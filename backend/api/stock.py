@@ -1,0 +1,273 @@
+"""
+选股 API 路由
+"""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+from typing import List
+
+from backend.database import get_db
+from backend.schemas import (
+    ApiResponse,
+    SelectRequest,
+    SelectionResult,
+    SelectionRecordResponse,
+    StockInfo,
+)
+from backend.services.stock_selector import select_stocks
+from backend.models import SelectionRecord, SelectedStock
+from backend.utils.trading_date import get_latest_trading_day
+from backend.core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+router = APIRouter()
+
+# 注入的 MCP 函数
+_tdx_mcp_func = None
+
+
+def set_tdx_mcp_func(func):
+    """设置通达信 MCP 函数"""
+    global _tdx_mcp_func
+    _tdx_mcp_func = func
+
+
+@router.get("/stock/trading-date", tags=["选股"])
+async def get_trading_date():
+    """获取最新交易日"""
+    try:
+        trading_date = get_latest_trading_day()
+        return ApiResponse(
+            code=200,
+            message="success",
+            data={"trading_date": trading_date}
+        )
+    except Exception as e:
+        logger.error(f"获取交易日失败: {e}")
+        return ApiResponse(
+            code=500,
+            message=f"获取交易日失败: {e}"
+        )
+
+
+@router.post("/stock/select", response_model=None, tags=["选股"])
+async def execute_selection(
+    request: SelectRequest,
+    db: Session = Depends(get_db)
+):
+    """执行选股任务"""
+    try:
+        # 记录请求参数
+        logger.info(f"选股请求参数: strategy_id={request.strategy_id}, task_template={request.task_template}, min_seal_rate={request.min_seal_rate}, min_open_change_pct={request.min_open_change_pct}")
+        
+        # 根据 strategy_id 获取策略配置
+        min_seal_rate = request.min_seal_rate
+        min_open_change_pct = request.min_open_change_pct
+        
+        if request.strategy_id:
+            from backend.services.strategy_service import StrategyTemplateService
+            service = StrategyTemplateService(db)
+            strategy = service.get_strategy(request.strategy_id)
+            if strategy:
+                config = strategy.conditions_config or {}
+                # 从策略配置中提取参数
+                if min_seal_rate is None:
+                    min_seal_rate = config.get("limit_up", {}).get("min_seal_rate")
+                if min_open_change_pct is None:
+                    min_open_change_pct = config.get("open_change", {}).get("min_open_change_pct")
+                logger.info(f"从策略 {strategy.name} 提取参数: min_seal_rate={min_seal_rate}, min_open_change_pct={min_open_change_pct}")
+        
+        # 确保任务模板正确
+        task_template = request.task_template
+        if request.strategy_id and not task_template:
+            from backend.services.strategy_service import StrategyTemplateService
+            service = StrategyTemplateService(db)
+            strategy = service.get_strategy(request.strategy_id)
+            if strategy:
+                task_template = strategy.task_template
+                logger.info(f"从策略 {strategy.name} 提取任务模板: {task_template}")
+
+        # 使用注入的 MCP 函数
+        result = select_stocks(
+            trade_date=request.trade_date,
+            task_template=task_template or "default",
+            custom_tasks=request.custom_tasks,
+            save_result=True,
+            tdx_mcp_func=_tdx_mcp_func,
+            min_seal_rate=min_seal_rate,
+            period_days=request.period_days,
+            min_open_change_pct=min_open_change_pct
+        )
+
+        if request.notify and result.get("passed_count", 0) > 0:
+            from backend.services.notification import FeishuNotifier
+            notifier = FeishuNotifier()
+            notification_sent = notifier.send_selection_result(result)
+            result["notification_sent"] = notification_sent
+
+        return ApiResponse(code=200, message="选股完成", data=result)
+
+    except Exception as e:
+        logger.error(f"选股执行失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"选股执行失败: {str(e)}")
+
+
+@router.get("/stock/results", response_model=None, tags=["选股"])
+async def get_selection_results(
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db)
+):
+    """获取选股结果列表"""
+    try:
+        offset = (page - 1) * page_size
+        
+        # 计算总数
+        total_count = db.query(func.count(SelectionRecord.id)).scalar()
+
+        # 获取记录
+        records = db.query(SelectionRecord)\
+            .order_by(SelectionRecord.created_at.desc())\
+            .offset(offset)\
+            .limit(page_size)\
+            .all()
+
+        result_records = []
+        for record in records:
+            result_records.append({
+                "id": record.id,
+                "execute_time": record.execute_time.isoformat() if record.execute_time else None,
+                "trade_date": record.trade_date,
+                "total_count": record.total_count,
+                "status": record.status,
+                "execution_time": record.execution_time,
+                "notification_sent": record.notification_sent
+            })
+
+        return ApiResponse(
+            code=200,
+            message="success",
+            data={
+                "records": result_records,
+                "total": total_count,
+                "page": page,
+                "page_size": page_size
+            }
+        )
+    except Exception as e:
+        logger.error(f"查询选股记录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.get("/stock/results/{record_id}", response_model=None, tags=["选股"])
+async def get_selection_detail(
+    record_id: int,
+    db: Session = Depends(get_db)
+):
+    """获取选股结果详情"""
+    try:
+        record = db.query(SelectionRecord).filter(SelectionRecord.id == record_id).first()
+        if not record:
+            raise HTTPException(status_code=404, detail="记录不存在")
+
+        stocks = db.query(SelectedStock).filter(SelectedStock.record_id == record_id).all()
+
+        stock_list = []
+        for stock in stocks:
+            stock_list.append({
+                "ts_code": stock.ts_code,
+                "name": stock.name,
+                "close_price": stock.close_price,
+                "change_pct": stock.change_pct,
+                "pre_change_pct": stock.pre_change_pct,
+                "open_change_pct": stock.open_change_pct,
+                "auction_ratio": stock.auction_ratio,
+                "auction_turnover_rate": stock.auction_turnover_rate,
+                "limit_up_count": stock.limit_up_count,
+                "touch_days": stock.touch_days,
+                "limit_up_days": stock.limit_up_days,
+                "seal_rate": stock.seal_rate,
+                "rise_10d_pct": stock.rise_10d_pct,
+                "circ_mv": stock.circ_mv,
+                "industry": stock.industry,
+                "concept": stock.concept,
+                "board_type": stock.board_type
+            })
+
+        result = {
+            "id": record.id,
+            "execute_time": record.execute_time.isoformat() if record.execute_time else None,
+            "trade_date": record.trade_date,
+            "total_count": record.total_count,
+            "status": record.status,
+            "execution_time": record.execution_time,
+            "notification_sent": record.notification_sent,
+            "stocks": stock_list
+        }
+
+        return ApiResponse(code=200, message="success", data=result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询选股详情失败: {e}")
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@router.delete("/stock/results/{record_id}", response_model=None, tags=["选股"])
+async def delete_selection_record(
+    record_id: int,
+    db: Session = Depends(get_db)
+):
+    """删除单条选股记录"""
+    try:
+        record = db.query(SelectionRecord).filter(SelectionRecord.id == record_id).first()
+        if not record:
+            raise HTTPException(status_code=404, detail="记录不存在")
+
+        db.delete(record)
+        db.commit()
+
+        logger.info(f"选股记录已删除: ID={record_id}")
+        return ApiResponse(code=200, message="删除成功", data={"deleted_id": record_id})
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"删除选股记录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+
+@router.post("/stock/results/batch-delete", response_model=None, tags=["选股"])
+async def batch_delete_selection_records(
+    ids: List[int],
+    db: Session = Depends(get_db)
+):
+    """批量删除选股记录"""
+    try:
+        if not ids:
+            raise HTTPException(status_code=422, detail="请提供要删除的记录ID列表")
+
+        records = db.query(SelectionRecord).filter(SelectionRecord.id.in_(ids)).all()
+        if not records:
+            raise HTTPException(status_code=404, detail="未找到指定的记录")
+
+        deleted_count = len(records)
+        for record in records:
+            db.delete(record)
+        db.commit()
+
+        logger.info(f"批量删除选股记录成功: IDs={ids}, 共{deleted_count}条")
+        return ApiResponse(code=200, message="批量删除成功", data={
+            "deleted_ids": ids,
+            "deleted_count": deleted_count
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"批量删除选股记录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"批量删除失败: {str(e)}")
