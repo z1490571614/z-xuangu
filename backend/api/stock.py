@@ -4,7 +4,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Dict, Any
 
 from backend.database import get_db
 from backend.schemas import (
@@ -16,6 +16,7 @@ from backend.schemas import (
 )
 from backend.services.stock_selector import select_stocks
 from backend.models import SelectionRecord, SelectedStock
+from backend.models.stock_risk import DragonLeaderScore
 from backend.utils.trading_date import get_latest_trading_day
 from backend.core.logging_config import get_logger
 
@@ -31,6 +32,78 @@ def set_tdx_mcp_func(func):
     """设置通达信 MCP 函数"""
     global _tdx_mcp_func
     _tdx_mcp_func = func
+
+
+def _get_stock_display_fallback(
+    db: Session,
+    ts_code: str,
+    trade_date: str,
+    cache: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """补齐最新选股记录缺失的涨停标签/题材展示字段"""
+    if ts_code in cache:
+        return cache[ts_code]
+
+    fallback: Dict[str, Any] = {}
+
+    previous = db.query(SelectedStock).join(
+        SelectionRecord, SelectedStock.record_id == SelectionRecord.id
+    ).filter(
+        SelectionRecord.trade_date == trade_date,
+        SelectionRecord.status == "success",
+        SelectedStock.ts_code == ts_code,
+    ).order_by(
+        (SelectedStock.lu_desc.isnot(None)).desc(),
+        (SelectedStock.concept.isnot(None)).desc(),
+        SelectionRecord.id.desc(),
+    ).first()
+
+    if previous:
+        fallback.update({
+            "industry": previous.industry,
+            "concept": previous.concept,
+            "board_type": previous.board_type,
+            "lu_desc": previous.lu_desc,
+            "lu_tag": previous.lu_tag,
+            "lu_status": previous.lu_status,
+            "lu_open_num": previous.lu_open_num,
+            "limit_up_suc_rate": previous.limit_up_suc_rate,
+            "latest_lu_date": previous.latest_lu_date,
+        })
+
+    if not fallback.get("lu_desc") or not fallback.get("lu_tag"):
+        try:
+            from backend.services.data_collector import TushareDataCollector
+            df = TushareDataCollector().get_limit_list_ths(
+                ts_code=ts_code,
+                trade_date=trade_date,
+                limit_type="涨停池",
+            )
+            if df is not None and not df.empty:
+                row = df.iloc[0]
+                fallback.update({
+                    "lu_desc": row.get("lu_desc"),
+                    "lu_tag": row.get("tag"),
+                    "lu_status": row.get("status"),
+                    "lu_open_num": int(row.get("open_num", 0) or 0),
+                    "limit_up_suc_rate": float(row.get("limit_up_suc_rate", 0) or 0),
+                    "latest_lu_date": str(row.get("trade_date", "") or ""),
+                })
+        except Exception as e:
+            logger.warning(f"涨停字段展示兜底失败 {ts_code}: {e}")
+
+    if not fallback.get("concept") and not fallback.get("board_type"):
+        try:
+            from backend.services.dragon_leader.data.theme_context import ThemeContext
+            concepts = ThemeContext().get_stock_concepts(ts_code)
+            names = [c.get("name", "") for c in concepts if c.get("name")]
+            if names:
+                fallback["concept"] = "、".join(names[:5])
+        except Exception as e:
+            logger.warning(f"题材字段展示兜底失败 {ts_code}: {e}")
+
+    cache[ts_code] = fallback
+    return fallback
 
 
 @router.get("/stock/trading-date", tags=["选股"])
@@ -174,7 +247,10 @@ async def get_selection_detail(
         stocks = db.query(SelectedStock).filter(SelectedStock.record_id == record_id).all()
 
         stock_list = []
+        fallback_cache: Dict[str, Dict[str, Any]] = {}
         for stock in stocks:
+            import json as _json
+            fallback = _get_stock_display_fallback(db, stock.ts_code, record.trade_date, fallback_cache)
             stock_list.append({
                 "ts_code": stock.ts_code,
                 "name": stock.name,
@@ -190,9 +266,31 @@ async def get_selection_detail(
                 "seal_rate": stock.seal_rate,
                 "rise_10d_pct": stock.rise_10d_pct,
                 "circ_mv": stock.circ_mv,
-                "industry": stock.industry,
-                "concept": stock.concept,
-                "board_type": stock.board_type
+                "industry": stock.industry or fallback.get("industry"),
+                "concept": stock.concept or fallback.get("concept"),
+                "board_type": stock.board_type or fallback.get("board_type"),
+                "rule_score": float(stock.rule_score) if stock.rule_score else None,
+                "model_score": float(stock.model_score) if stock.model_score else None,
+                "final_score": float(stock.final_score) if stock.final_score else None,
+                "score_level": stock.score_level,
+                "reasons": stock.reasons.split("; ") if stock.reasons else [],
+                "risk_tags": _json.loads(stock.risk_tags) if stock.risk_tags else [],
+                "record_id": record_id,
+                # 龙头战法评分
+                "leader_strength_score": None,
+                "retreat_risk_score": None,
+                "health_score": None,
+                "leader_level": None,
+                "cycle_stage": None,
+                # 同花顺涨停榜单数据
+                "lu_desc": stock.lu_desc or fallback.get("lu_desc"),
+                "lu_tag": stock.lu_tag or fallback.get("lu_tag"),
+                "lu_status": stock.lu_status or fallback.get("lu_status"),
+                "lu_open_num": stock.lu_open_num if stock.lu_open_num is not None else fallback.get("lu_open_num"),
+                "limit_up_suc_rate": float(stock.limit_up_suc_rate) if stock.limit_up_suc_rate else fallback.get("limit_up_suc_rate"),
+                "latest_lu_date": stock.latest_lu_date or fallback.get("latest_lu_date"),
+                # 上一日换手率
+                "prev_turnover_rate": float(stock.prev_turnover_rate) if stock.prev_turnover_rate else None,
             })
 
         result = {
@@ -205,6 +303,23 @@ async def get_selection_detail(
             "notification_sent": record.notification_sent,
             "stocks": stock_list
         }
+
+        # 批量填充龙头战法评分
+        if stock_list and record.trade_date:
+            ts_codes = [s["ts_code"] for s in stock_list]
+            dl_records = db.query(DragonLeaderScore).filter(
+                DragonLeaderScore.ts_code.in_(ts_codes),
+                DragonLeaderScore.trade_date == record.trade_date,
+            ).all()
+            dl_map = {r.ts_code: r for r in dl_records}
+            for s in stock_list:
+                dl = dl_map.get(s["ts_code"])
+                if dl:
+                    s["leader_strength_score"] = dl.leader_strength_score
+                    s["retreat_risk_score"] = dl.retreat_risk_score
+                    s["health_score"] = dl.health_score
+                    s["leader_level"] = dl.leader_level
+                    s["cycle_stage"] = dl.cycle_stage
 
         return ApiResponse(code=200, message="success", data=result)
 

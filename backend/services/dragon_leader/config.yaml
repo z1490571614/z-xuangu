@@ -1,0 +1,31 @@
+dragon_leader:
+  health_formula:
+    leader_strength_weight: 0.60
+    retreat_risk_weight: -0.30
+    announcement_alpha_weight: 0.50
+    lhb_alpha_weight: 0.50
+    base_score: 20
+
+  leader_strength:
+    leader_status: 25
+    theme_strength: 20
+    emotion_cycle: 15
+    sector_ladder: 15
+    acceptance_strength: 10
+    auction_intraday: 10
+    lhb_bonus: 5
+
+  retreat_risk:
+    leader_position_loss: 20
+    emotion_retreat: 20
+    ladder_break: 15
+    acceptance_failure: 15
+    chip_cashout: 10
+    auction_miss: 10
+    announcement_regulatory: 10
+
+  alpha_limits:
+    announcement_alpha_min: -20
+    announcement_alpha_max: 20
+    lhb_alpha_min: -20
+    lhb_alpha_max: 20

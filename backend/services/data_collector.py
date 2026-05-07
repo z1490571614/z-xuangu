@@ -13,6 +13,7 @@ os.environ.setdefault('TUSHARE_PRO_SAVE_PATH', os.path.join(os.path.dirname(os.p
 os.makedirs(os.environ['TUSHARE_PRO_SAVE_PATH'], exist_ok=True)
 
 from backend.utils.trading_date import is_trading_day, get_latest_trading_day
+from backend.utils.tushare_client import get_tushare_pro, get_tushare_token
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class TushareDataCollector:
         Args:
             token: Tushare API Token，如果为None则从环境变量获取
         """
-        self.token = token or os.getenv("TUSHARE_TOKEN")
+        self.token = get_tushare_token(token)
         if not self.token:
             raise ValueError("Tushare Token 未配置，请设置 TUSHARE_TOKEN 环境变量")
 
@@ -48,10 +49,9 @@ class TushareDataCollector:
     def _create_pro(self):
         """创建新的 Pro API 实例（内部使用）"""
         try:
-            ts.set_token(self.token)
-            return ts.pro_api()
+            return get_tushare_pro(self.token)
         except OSError:
-            return ts.pro_api(self.token)
+            return get_tushare_pro(self.token)
 
     def get_trading_calendar(self, year: Optional[int] = None) -> set:
         """
@@ -306,6 +306,39 @@ class TushareDataCollector:
             return df
         except Exception as e:
             logger.error(f"获取涨跌停数据失败: {e}")
+            return pd.DataFrame()
+
+    def get_limit_list_ths(
+        self,
+        ts_code: Optional[str] = None,
+        trade_date: Optional[str] = None,
+        limit_type: str = '涨停池',
+    ) -> pd.DataFrame:
+        """
+        获取同花顺涨跌停榜单数据
+
+        Args:
+            ts_code: 股票代码
+            trade_date: 交易日期（YYYYMMDD格式）
+            limit_type: 板单类别，如涨停池、连扳池、炸板池等
+
+        Returns:
+            同花顺涨跌停榜单DataFrame
+        """
+        try:
+            kwargs = {'limit_type': limit_type}
+            if ts_code:
+                kwargs['ts_code'] = ts_code
+            if trade_date:
+                kwargs['trade_date'] = trade_date
+            df = self.pro.limit_list_ths(**kwargs)
+            if df is not None and len(df) > 0:
+                logger.info(f"获取同花顺涨跌停榜单成功，共 {len(df)} 条记录")
+                return df
+            logger.warning(f"获取同花顺涨跌停榜单返回空数据")
+            return pd.DataFrame()
+        except Exception as e:
+            logger.warning(f"获取同花顺涨跌停榜单失败: {e}")
             return pd.DataFrame()
 
     def get_stk_limit(
