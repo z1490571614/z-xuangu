@@ -95,7 +95,7 @@ def _get_stock_display_fallback(
     if not fallback.get("concept") and not fallback.get("board_type"):
         try:
             from backend.services.dragon_leader.data.theme_context import ThemeContext
-            concepts = ThemeContext().get_stock_concepts(ts_code)
+            concepts = ThemeContext().get_stock_concepts(ts_code, trade_date)
             names = [c.get("name", "") for c in concepts if c.get("name")]
             if names:
                 fallback["concept"] = "、".join(names[:5])

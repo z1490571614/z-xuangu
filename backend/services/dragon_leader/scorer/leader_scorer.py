@@ -100,10 +100,24 @@ def calculate_theme_strength(ctx: Dict) -> Dict:
 
     best_rank = theme_rank.get("best_rank", 999)
     best_name = theme_rank.get("best_name", "")
+    primary_board = theme_rank.get("primary_board", {}) or {}
+    primary_matched_from = primary_board.get("matched_from", "")
+    dictionary_match_labels = {
+        "news_theme_board": "新闻主题确认",
+        "limit_tag_board": "涨停标签确认",
+        "selected_concept_board": "概念字段确认",
+        "selected_board_type_board": "板块字段确认",
+        "selected_industry_board": "行业字段确认",
+        "exact_lu_desc_board": "涨停原因确认",
+    }
     board_count = theme_rank.get("board_count", 0)
     hot_boards = theme_rank.get("hot_boards", [])
+    all_concepts = theme_rank.get("all_concepts", [])
 
-    if best_rank <= 3:
+    if best_name and primary_matched_from in dictionary_match_labels:
+        score += 6
+        tips.append(f"主跟随题材：{_fmt_sector(best_name)}，{dictionary_match_labels[primary_matched_from]}")
+    elif best_rank <= 3:
         score += 10
         tips.append(f"主跟随题材：{_fmt_sector(best_name)}，排名第{best_rank}，市场主线")
     elif best_rank <= 5:
@@ -117,19 +131,37 @@ def calculate_theme_strength(ctx: Dict) -> Dict:
         tips.append(f"主跟随题材：{_fmt_sector(best_name)}，排名第{best_rank}")
     else:
         score += 1
+        names = [c.get("name", "") for c in all_concepts if c.get("name")]
+        if names:
+            tips.append("所属题材：" + "、".join(names[:5]))
 
     if board_count >= 2:
         score += 3
-        names = [
-            f"{_fmt_sector(b.get('name', ''))}(第{b.get('rank', '--')})"
-            for b in hot_boards[:5] if b.get("name")
-        ]
+        names = []
+        has_rankless_dictionary_match = False
+        for b in hot_boards[:5]:
+            if not b.get("name"):
+                continue
+            rank = b.get("rank", "--")
+            try:
+                rank_value = int(rank or 999)
+            except (TypeError, ValueError):
+                rank_value = 999
+            if b.get("matched_from") in dictionary_match_labels and rank_value >= 999:
+                has_rankless_dictionary_match = True
+                names.append(_fmt_sector(b.get("name", "")))
+            else:
+                names.append(f"{_fmt_sector(b.get('name', ''))}(第{rank})")
         if names:
-            tips.append(f"命中{board_count}个热点题材：" + "、".join(names))
+            prefix = "命中候选题材：" if has_rankless_dictionary_match else f"命中{board_count}个热点题材："
+            candidate_tip = prefix + "、".join(names)
         else:
-            tips.append(f"个股属于{board_count}个热点题材")
+            candidate_tip = f"个股属于{board_count}个热点题材"
     elif board_count == 1:
         score += 1
+        candidate_tip = ""
+    else:
+        candidate_tip = ""
 
     for board in hot_boards[:3]:
         name = _fmt_sector(board.get("name", ""))
@@ -145,7 +177,11 @@ def calculate_theme_strength(ctx: Dict) -> Dict:
             score += 1
             tips.append(f"{name}持续{days}天，题材有持续性")
 
-    return {"score": min(score, 20), "tips": tips[:4], "data_status": "available" if best_rank < 999 else "insufficient_data"}
+    if candidate_tip:
+        tips.append(candidate_tip)
+
+    data_status = "available" if best_rank < 999 or primary_matched_from in dictionary_match_labels else "insufficient_data"
+    return {"score": min(score, 20), "tips": tips[:4], "data_status": data_status}
 
 
 def calculate_emotion_cycle(ctx: Dict) -> Dict:

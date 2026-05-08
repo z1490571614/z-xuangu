@@ -17,6 +17,10 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class McpTemporaryUnavailable(RuntimeError):
+    """MCP上游临时不可用，可触发本地降级"""
+
+
 @dataclass
 class McpSession:
     """MCP会话信息"""
@@ -101,7 +105,8 @@ class TdxMcpSessionManager:
                                 break
 
                 if not session_id:
-                    session_id = f"session-{int(time.time())}"
+                    logger.error("❌ MCP服务器未返回有效的会话ID")
+                    raise RuntimeError("MCP服务器未返回有效的会话ID")
 
                 current_time = time.time()
                 session = McpSession(
@@ -111,7 +116,7 @@ class TdxMcpSessionManager:
                     expires_at=current_time + self.session_timeout,
                 )
 
-                logger.info(f"✅ MCP会话创建成功: session_id={session_id}")
+                logger.info(f"✅ MCP会话创建成功: session_id={session_id[:10]}...")
                 return session
 
         except Exception as e:
@@ -289,6 +294,16 @@ class TdxMcpHttpClient:
                 else:
                     result = {"meta": {"code": 0, "total": 0}, "data": []}
 
+                if "error" in result:
+                    error_info = result["error"]
+                    error_code = error_info.get("code", "UNKNOWN")
+                    error_msg = error_info.get("message", "未知错误")
+                    if "503" in str(error_msg) or "Service unavailable" in str(error_msg):
+                        logger.warning(f"⚠️ MCP临时不可用: [{error_code}] {error_msg}")
+                        raise McpTemporaryUnavailable(f"MCP临时不可用: [{error_code}] {error_msg}")
+                    logger.error(f"❌ MCP业务错误: [{error_code}] {error_msg}")
+                    raise RuntimeError(f"MCP业务错误: [{error_code}] {error_msg}")
+
                 total = result.get("meta", {}).get("total", 0)
                 logger.info(f"✅ MCP查询成功: 返回 {total} 条记录")
 
@@ -300,6 +315,8 @@ class TdxMcpHttpClient:
             raise
         except httpx.RequestError as e:
             logger.error(f"❌ MCP请求失败: {e}")
+            raise
+        except McpTemporaryUnavailable:
             raise
         except Exception as e:
             logger.error(f"❌ MCP查询未知错误: {e}", exc_info=True)

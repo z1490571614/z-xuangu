@@ -64,37 +64,51 @@ def match_seat_tag(exalter: str) -> Tuple[str, Optional[str]]:
         tag: 机构/北向/一线游资/核按钮/散户/高溢价/普通/量化
         detail_type: 具体类型说明（如"余哥关联"）
     """
+    normalized = _normalize_seat_name(exalter)
+
     # 高溢价（优先匹配，包含机构/北向）
     for kw in SEAT_PREMIUM:
-        if kw in exalter:
+        if _seat_keyword_match(kw, exalter, normalized):
             return ("高溢价", kw)
 
     # 机构/北向（溢价席位）
     for kw in SEAT_INST:
-        if kw in exalter:
+        if _seat_keyword_match(kw, exalter, normalized):
             return ("高溢价", "机构" if kw == "机构专用" else "北向")
 
     # 核按钮
     for kw in SEAT_KNOCK:
-        if kw in exalter:
+        if _seat_keyword_match(kw, exalter, normalized):
             return ("核按钮", kw)
 
     # 量化席位（砸盘）
     for kw in SEAT_QUANT:
-        if kw in exalter:
+        if _seat_keyword_match(kw, exalter, normalized):
             return ("量化", kw)
 
     # 一线游资
     for kw in SEAT_TOP_TRADERS:
-        if kw in exalter:
+        if _seat_keyword_match(kw, exalter, normalized):
             return ("一线游资", None)
 
     # 散户/砸盘
     for kw in SEAT_SCATTER:
-        if kw in exalter:
+        if _seat_keyword_match(kw, exalter, normalized):
             return ("散户", kw)
 
     return ("普通", None)
+
+
+def _normalize_seat_name(exalter: str) -> str:
+    text = str(exalter or "")
+    for token in ("股份有限公司", "有限责任公司", "有限公司", "证券营业部", "营业部"):
+        text = text.replace(token, "")
+    return text
+
+
+def _seat_keyword_match(keyword: str, exalter: str, normalized_exalter: str) -> bool:
+    normalized_keyword = _normalize_seat_name(keyword)
+    return keyword in exalter or normalized_keyword in normalized_exalter
 
 
 def is_scatter_seat(exalter: str) -> bool:

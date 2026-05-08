@@ -45,6 +45,17 @@ class StockInfo(BaseModel):
     industry: Optional[str] = Field(default=None, description="所属行业")
     concept: Optional[str] = Field(default=None, description="概念板块")
 
+    # 涨停榜单（同花顺）数据
+    lu_desc: Optional[str] = Field(default=None, description="涨停原因")
+    lu_tag: Optional[str] = Field(default=None, description="涨停标签（如5天3板）")
+    lu_status: Optional[str] = Field(default=None, description="涨停状态（如换手板）")
+    lu_open_num: Optional[int] = Field(default=None, description="打开次数")
+    limit_up_suc_rate: Optional[float] = Field(default=None, description="近一年涨停封板率")
+    latest_lu_date: Optional[str] = Field(default=None, description="最新涨停日期")
+
+    # 每日基本面数据
+    prev_turnover_rate: Optional[float] = Field(default=None, description="上一日换手率（%）")
+
 
 class SelectionResult(BaseModel):
     """选股结果"""

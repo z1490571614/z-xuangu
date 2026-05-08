@@ -215,6 +215,8 @@ def collect_news(ts_code: str, stock_name: str) -> list:
 
     # 重新用新引擎分析情感
     for i, item in enumerate(news_list):
+        news_list[i]["stock_name"] = stock_name
+        news_list[i]["ts_code"] = ts_code
         result = analyze_news_event(item, debug=False)
         news_list[i]["sentiment_type"] = result["sentiment"]
         news_list[i]["sentiment_score"] = result["confidence"]

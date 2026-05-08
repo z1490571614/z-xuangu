@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Project Status",
+  "description": "跟踪 SpecForge 项目的阶段、功能、Bug 和决策状态",
+  "type": "object",
+  "required": ["project_name", "current_stage", "completed_stages", "features", "bugs", "technical_debt", "decisions", "last_updated"],
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "description": "项目名称"
+    },
+    "current_stage": {
+      "type": "string",
+      "enum": ["intake", "product-overview", "requirements", "tech-stack", "project-structure", "dev-standards", "planning", "implementation", "testing", "release", "maintenance"],
+      "description": "当前项目阶段"
+    },
+    "completed_stages": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "已完成的阶段列表"
+    },
+    "active_feature": {
+      "type": ["string", "null"],
+      "description": "当前活跃的功能名称，null 表示无"
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status"],
+        "properties": {
+          "name": { "type": "string", "description": "功能名称" },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "requirements", "tech-design", "task-planning", "in-progress", "completed"]
+          },
+          "ac_count": { "type": "integer", "description": "验收标准数量" },
+          "completed_tasks": { "type": "integer", "default": 0 },
+          "total_tasks": { "type": "integer", "default": 0 },
+          "current_stage_index": { "type": "integer", "default": 0 },
+          "specs_path": { "type": "string", "description": "功能文档路径" }
+        }
+      }
+    },
+    "bugs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "severity", "status"],
+        "properties": {
+          "id": { "type": "string", "description": "BUG-001 格式" },
+          "title": { "type": "string" },
+          "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "status": { "type": "string", "enum": ["reported", "reproduced", "in-progress", "fixed", "verified"] },
+          "report_path": { "type": "string" }
+        }
+      }
+    },
+    "technical_debt": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "description": { "type": "string" },
+          "suggested_timing": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "context", "decision", "date"],
+        "properties": {
+          "id": { "type": "string", "description": "DEC-001 格式" },
+          "title": { "type": "string" },
+          "context": { "type": "string", "description": "决策背景" },
+          "decision": { "type": "string", "description": "做出的决定" },
+          "reason": { "type": "string", "description": "理由" },
+          "date": { "type": "string", "format": "date" }
+        }
+      }
+    },
+    "last_updated": {
+      "type": "string",
+      "format": "date-time",
+      "description": "最后更新时间，ISO 8601 格式"
+    }
+  }
+}

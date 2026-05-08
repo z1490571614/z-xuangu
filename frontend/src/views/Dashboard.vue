@@ -21,6 +21,15 @@
         <h3>交易日</h3>
         <p class="value stat-date">{{ stats.tradeDate || '--' }}</p>
       </div>
+      <div class="stat-card">
+        <h3>LightGBM</h3>
+        <p :class="['stat-value', stats.modelEnabled ? 'ok' : 'err']">{{ stats.modelEnabled ? '已启用' : '未启用' }}</p>
+      </div>
+      <div class="stat-card">
+        <h3>高风险股票</h3>
+        <p :class="['stat-value', stats.highRiskCount > 0 ? 'err' : 'ok']">{{ stats.highRiskCount }}</p>
+        <p class="stat-label">只股票</p>
+      </div>
     </div>
 
     <div v-if="!loaded" class="loading">加载中...</div>
@@ -52,7 +61,6 @@
         <table class="enhanced-table">
           <thead>
             <tr>
-              <th>序号</th>
               <th>代码</th>
               <th>名称</th>
               <th @click="sortBy('close_price')" class="sortable">
@@ -69,24 +77,35 @@
               </th>
               <th>昨涨幅</th>
               <th>开涨幅</th>
-              <th>竞昨比</th>
+              <th @click="sortBy('auction_ratio')" class="sortable">
+                竞昨比
+                <span v-if="sortField === 'auction_ratio'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
               <th>竞价换手率</th>
               <th>100天内涨停次数</th>
               <th>100天内封成比</th>
               <th>10日涨幅</th>
-              <th>行业概念</th>
-              <th>板块</th>
+              <th @click="sortBy('health_score')" class="sortable">
+                龙头评级
+                <span v-if="sortField === 'health_score'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
             </tr>
           </thead>
           <tbody>
-            <tr
+            <template
               v-for="(stock, index) in sortedStocks"
               :key="stock.ts_code"
             >
+            <tr>
               <!-- 基本信息 -->
-              <td class="index-col">{{ index + 1 }}</td>
               <td class="code-cell"><code>{{ stock.ts_code }}</code></td>
-              <td class="name-cell"><strong>{{ stock.name }}</strong></td>
+              <td class="name-cell">
+                <a class="stock-link" href="#" @click.prevent="openDetail(stock)">{{ stock.name }}</a>
+              </td>
 
               <!-- 行情数据 -->
               <td class="num-cell">{{ fmt(stock.close_price) }}</td>
@@ -110,17 +129,28 @@
               <td :class="['num-cell', getPctClass(stock.rise_10d_pct)]">
                 {{ fmtPct(stock.rise_10d_pct) }}
               </td>
-
-              <!-- 分类信息 -->
-              <td class="tag-cell">
-                <span v-if="stock.industry" class="industry-tag">{{ stock.industry }}</span>
-                <span v-else class="muted">--</span>
-              </td>
-              <td class="tag-cell">
-                <span v-if="stock.board_type" class="sector-tag">{{ stock.board_type }}</span>
+              <td class="score-cell">
+                <span v-if="stock.leader_level" class="score-wrap">
+                  <span :class="['score-level-tag', leaderLevelClass(stock)]">{{ stock.leader_level }}</span>
+                  <span class="score-health">健{{ stock.health_score }}</span>
+                </span>
+                <span v-else-if="displayScore(stock) !== null" class="score-wrap">
+                  <span class="score-num">{{ displayScore(stock) }}</span>
+                  <span :class="['score-level-tag', scoreLevelClass(stock)]">{{ scoreLevelText(stock) }}</span>
+                </span>
                 <span v-else class="muted">--</span>
               </td>
             </tr>
+            <!-- 涨停/换手率标签行 -->
+            <tr v-if="hasEnrichData(stock)" class="enrich-row">
+              <td colspan="3" class="enrich-cell"><span class="enrich-tag lu-desc">{{ stock.lu_desc || '--' }}</span></td>
+              <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
+              <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
+              <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag open-num">炸板{{ stock.lu_open_num != null ? stock.lu_open_num : 0 }}次</span></td>
+              <td colspan="2" class="enrich-cell"><span class="enrich-tag suc-rate">近一年封板率{{ fmtRate(stock.limit_up_suc_rate) }}</span></td>
+              <td colspan="1" class="enrich-cell"><span class="enrich-tag turnover">昨日换手{{ fmtPct(stock.prev_turnover_rate) }}</span></td>
+            </tr>
+            </template>
           </tbody>
         </table>
       </div>
@@ -136,6 +166,16 @@
       @error="onSelectionError"
       @loading="selecting = $event"
     />
+
+    <!-- 个股详情抽屉 -->
+    <StockDetailDrawer
+      :visible="showDrawer"
+      :ts-code="drawerTsCode"
+      :stock-name="drawerStockName"
+      :trade-date="drawerTradeDate"
+      :record-id="drawerRecordId"
+      @close="showDrawer = false"
+    />
   </div>
 </template>
 
@@ -144,18 +184,25 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
 import StrategySelectorModal from '../components/StrategySelectorModal.vue'
+import StockDetailDrawer from '../components/StockDetailDrawer.vue'
 
 const router = useRouter()
 
-const stats = ref({ latestCount: 0, totalRecords: 0, healthy: false, tradeDate: '' })
+const stats = ref({ latestCount: 0, totalRecords: 0, healthy: false, tradeDate: '', modelEnabled: false, highRiskCount: 0 })
 const loaded = ref(false)
 const selecting = ref(false)
 const message = ref(null)
 const latestStocks = ref([])
 const latestDate = ref('')
 const showStrategyModal = ref(false)
-const sortField = ref('change_pct')
+const sortField = ref('health_score')
 const sortOrder = ref('desc')
+
+const showDrawer = ref(false)
+const drawerTsCode = ref('')
+const drawerStockName = ref('')
+const drawerTradeDate = ref('')
+const drawerRecordId = ref(null)
 
 const sortedStocks = computed(() => {
   if (!latestStocks.value.length) return []
@@ -203,7 +250,17 @@ async function loadLatest() {
     const rec = (rd.records || []).find(x => x.total_count > 0)
     if (rec) {
       const detail = await axios.get(`/api/v1/stock/results/${rec.id}`)
-      latestStocks.value = detail.data?.data?.stocks || []
+      const stocks = detail.data?.data?.stocks || []
+      latestStocks.value = stocks
+      // 计算高风险股票数量（risk_tags 不为空）
+      stats.value.highRiskCount = stocks.filter(s => (s.risk_tags || []).length > 0).length
+    }
+    // 检测 LightGBM 模型状态
+    try {
+      const modelRes = await axios.get('/api/v1/model/status')
+      stats.value.modelEnabled = modelRes.data?.data?.enabled || false
+    } catch (e) {
+      stats.value.modelEnabled = false
     }
   } catch (e) { console.error('加载最新失败:', e) }
 }
@@ -215,6 +272,43 @@ function sortBy(field) {
     sortField.value = field
     sortOrder.value = 'desc'
   }
+}
+
+function openDetail(stock) {
+  drawerTsCode.value = stock.ts_code
+  drawerStockName.value = stock.name
+  drawerTradeDate.value = latestDate.value
+  drawerRecordId.value = stock.record_id || null
+  showDrawer.value = true
+}
+
+function displayScore(stock) {
+  const s = stock.final_score != null ? stock.final_score : stock.rule_score
+  return s != null ? Number(s).toFixed(1) : null
+}
+
+function scoreLevelText(stock) {
+  const s = stock.final_score != null ? stock.final_score : stock.rule_score
+  if (s == null) return ''
+  if (s >= 90) return 'S'
+  if (s >= 80) return 'A'
+  if (s >= 70) return 'B'
+  if (s >= 60) return 'C'
+  return 'D'
+}
+
+function scoreLevelClass(stock) {
+  const txt = scoreLevelText(stock)
+  if (txt === 'S' || txt === 'A') return 'level-high'
+  if (txt === 'B') return 'level-mid'
+  return 'level-low'
+}
+
+function leaderLevelClass(stock) {
+  const lvl = stock.leader_level || ''
+  if (lvl === '极强龙头' || lvl === '强势龙头') return 'level-high'
+  if (lvl === '疑似龙头' || lvl === '跟风强势股') return 'level-mid'
+  return 'level-low'
 }
 
 function openStrategySelector() {
@@ -261,6 +355,20 @@ async function testNotification() {
   setTimeout(() => message.value = null, 3000)
 }
 
+function fmtRate(v) {
+  if (v == null) return '--'
+  const pct = v * 100
+  return pct.toFixed(1) + '%'
+}
+
+function hasEnrichData(stock) {
+  return stock.lu_desc || stock.lu_tag || stock.lu_status || stock.lu_open_num != null || stock.limit_up_suc_rate != null || stock.prev_turnover_rate != null
+}
+
+function isLimitUp(stock) {
+  return stock.pre_change_pct != null && stock.pre_change_pct >= 9.8
+}
+
 function fmt(v) { return v != null ? Number(v).toFixed(2) : '--' }
 function fmtPct(v) { return v != null ? Number(v).toFixed(2) + '%' : '--' }
 
@@ -273,8 +381,8 @@ function getPctClass(v) {
 </script>
 
 <style scoped>
-.dashboard { padding: 20px; max-width: 1800px; margin: 0 auto; }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin: 16px 0; }
+.dashboard { padding: 15px 25px; width: 100%; box-sizing: border-box; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; margin: 12px 0; }
 .stat-card { background: white; padding: 18px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
 .stat-card h3 { margin: 0 0 8px; color: #666; font-size: 13px; font-weight: normal; }
 .stat-value { margin: 0; font-size: 30px; font-weight: bold; color: #333; }
@@ -362,6 +470,8 @@ function getPctClass(v) {
   font-weight: 600;
 }
 .name-cell strong { color: #262626; font-weight: 600; }
+.stock-link { color: #667eea; font-weight: 600; text-decoration: none; cursor: pointer; }
+.stock-link:hover { text-decoration: underline; color: #764ba2; }
 .num-cell { font-family: 'SF Mono', -apple-system, sans-serif; font-variant-numeric: tabular-nums; }
 .num-cell.muted { color: #bbb; }
 .num-cell.highlight { color: #ff4d4f; font-weight: 700; }
@@ -385,6 +495,14 @@ function getPctClass(v) {
 
 /* 标签样式 */
 .tag-cell { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.score-cell { min-width: 80px; text-align: center; }
+.score-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.score-num { font-family: 'SF Mono', monospace; font-size: 14px; font-weight: 700; color: #667eea; }
+.score-health { font-size: 10px; color: #1890ff; font-weight: 600; margin-left: 2px; }
+.score-level-tag { display: inline-block; padding: 1px 8px; border-radius: 8px; font-size: 11px; font-weight: 700; }
+.score-level-tag.level-high { background: #f6ffed; color: #52c41a; }
+.score-level-tag.level-mid { background: #fff7e6; color: #fa8c16; }
+.score-level-tag.level-low { background: #fff2f0; color: #ff4d4f; }
 .industry-tag {
   background: linear-gradient(135deg, #e6f7ff 0%, #bae7ff 100%);
   color: #1890ff;
@@ -410,6 +528,50 @@ function getPctClass(v) {
   white-space: nowrap;
 }
 .muted { color: #ccc; }
+
+/* 涨停/换手率标签行 */
+.enrich-row { background: #fafbfc; }
+.enrich-row:hover { background: #f0f5ff; }
+.enrich-cell {
+  padding: 6px 4px !important;
+  text-align: center !important;
+}
+.enrich-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.enrich-tag.lu-desc {
+  background: #E3F2FD;
+  color: #1565C0;
+}
+.enrich-tag.lu-tag {
+  background: #FFF3E0;
+  color: #E65100;
+}
+.enrich-tag.lu-status {
+  background: #FFF3E0;
+  color: #E65100;
+}
+.enrich-tag.open-num {
+  background: #FFEBEE;
+  color: #C62828;
+}
+.enrich-tag.suc-rate {
+  background: #F5F5F5;
+  color: #333333;
+}
+.enrich-tag.turnover {
+  background: #F5F5F5;
+  color: #333333;
+}
 
 .loading { text-align: center; color: #1890ff; padding: 40px; }
 

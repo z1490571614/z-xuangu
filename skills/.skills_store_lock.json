@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "新闻搜索": {
+      "name": "新闻搜索",
+      "zip_url": "http://ms.10jqka.com.cn/gateway/market/api/v1/skills/square/download?name=%E6%96%B0%E9%97%BB%E6%90%9C%E7%B4%A2",
+      "source": "skillhub",
+      "version": ""
+    }
+  }
+}

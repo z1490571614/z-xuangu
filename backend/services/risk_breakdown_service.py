@@ -12,19 +12,20 @@ from datetime import datetime, timedelta
 from backend.database import SessionLocal
 from backend.models.stock_risk import StockRiskBreakdown
 from backend.models import SelectedStock, SelectionRecord
+from backend.services.dc_board_service import DcBoardService
 from backend.utils.tushare_client import get_tushare_pro
 
 logger = logging.getLogger(__name__)
 
 # 风险维度权重（总分100）- 新增技术面维度
 RISK_WEIGHTS = {
-    "market": 12,       # 行情 12分（个股波动 + 全局市场情绪）
-    "chip": 15,         # 筹码 15分
-    "news": 20,         # 舆情&公告综合 20分
-    "capital": 15,      # 资金 15分
+    "market": 10,       # 市场环境 10分
+    "chip": 14,         # 筹码压力 14分
+    "news": 18,         # 舆情与公告 18分
+    "capital": 14,      # 个股资金 14分
     "lhb": 10,          # 龙虎 10分
-    "sector": 10,       # 行业 10分（含板块资金流）
-    "technical": 18,    # 技术面 18分（新增，stk_factor_pro）
+    "sector": 18,       # 板块与题材风险 18分
+    "technical": 16,    # 技术结构 16分
 }
 
 # 公告风险关键词（合并到舆情&公告综合维度）
@@ -40,57 +41,8 @@ NEWS_RISK_KEYWORDS = {
     "违约": 7, "债务违约": 8, "逾期": 5,
 }
 
-# 同花顺行业代码映射（覆盖常见申万行业 + 实际选股中出现的高频行业）
-# 来源：ths_index 接口查询 + 存量数据积累
-INDUSTRY_CODE_MAP = {
-    "建筑材料": "881167.TI", "建筑装饰": "881168.TI",
-    "房地产": "881153.TI", "银行": "881155.TI",
-    "证券": "881157.TI", "保险": "881156.TI",
-    "食品饮料": "881161.TI", "白酒": "881273.TI",
-    "医药生物": "881150.TI", "医疗器械": "881250.TI",
-    "电子": "881131.TI", "半导体": "881121.TI",
-    "计算机": "881133.TI", "通信设备": "881129.TI",
-    "通信服务": "881162.TI", "通信": "881162.TI",
-    "电力设备": "881114.TI", "新能源": "881142.TI",
-    "汽车": "881124.TI", "新能源汽车": "881242.TI",
-    "机械设备": "881125.TI", "军工": "881141.TI",
-    "有色金属": "881112.TI", "钢铁": "881112.TI",
-    "煤炭": "881105.TI", "石油石化": "881104.TI",
-    "基础化工": "881106.TI", "化工": "881106.TI",
-    "农林牧渔": "881151.TI", "纺织服装": "881152.TI",
-    "轻工制造": "881126.TI", "商贸零售": "881162.TI",
-    "社会服务": "881163.TI", "交通运输": "881148.TI",
-    "公用事业": "881145.TI", "环保": "881144.TI",
-    "传媒": "881132.TI", "电器仪表": "881114.TI",
-    "环保工程": "881144.TI", "环境保护": "881144.TI",
-    "纺织机械": "881125.TI", "玻璃": "881167.TI",
-    "建材": "881167.TI", "多元金融": "881283.TI",
-    "铝": "881112.TI", "工业金属": "881112.TI",
-    "建筑工程": "881168.TI", "装修装饰": "881168.TI",
-    "中药": "881150.TI", "化学制药": "881150.TI",
-    "生物制品": "881150.TI", "汽车零部件": "881242.TI",
-    "电力": "881145.TI", "燃气": "881145.TI",
-    "水务": "881145.TI", "物流": "881148.TI",
-    "航空机场": "881148.TI", "铁路公路": "881148.TI",
-    "软件开发": "881133.TI", "IT服务": "881133.TI",
-    "光伏设备": "881142.TI", "风电设备": "881142.TI",
-    "电池": "881142.TI", "电网设备": "881114.TI",
-    "互联网": "881133.TI", "供气供热": "881145.TI",
-    "供热": "881145.TI", "供气": "881145.TI",
-    "医疗服务": "881150.TI", "医药商业": "881150.TI",
-    "渔业": "881151.TI", "农业": "881151.TI",
-    "畜牧业": "881151.TI", "种植业": "881151.TI",
-    "食品": "881161.TI", "饮料": "881161.TI",
-    "造纸": "881126.TI", "包装印刷": "881126.TI",
-    "橡胶": "881106.TI", "塑料": "881106.TI",
-    "电子元件": "881131.TI", "光学光电子": "881131.TI",
-    "航空装备": "881141.TI", "地面兵装": "881141.TI",
-    "船舶": "881141.TI", "航天": "881141.TI",
-}
-
-# 同花顺行业映射缓存
-_THS_INDUSTRY_CACHE: Dict[str, Optional[str]] = {}
-_THS_BOARD_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+# 东财个股-板块候选缓存
+_DC_BOARD_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 
 BOARD_TYPE_PRIORITY = {
     "N": 8,     # 概念指数
@@ -161,6 +113,10 @@ class RiskBreakdownService:
     def __init__(self):
         self._pro = None
         self._market_sentiment_cache: Dict[str, Dict] = {}
+        self._board_service = DcBoardService()
+        self._last_sector_context: Dict[str, Any] = {}
+        self._last_lhb_strength_evidence: List[Dict[str, Any]] = []
+        self._last_lhb_risk_evidence: List[Dict[str, Any]] = []
 
     @property
     def pro(self):
@@ -240,6 +196,11 @@ class RiskBreakdownService:
             "lhb_tips": lhb_tips,
             "sector_tips": sector_tips,
             "technical_tips": technical_tips,
+            "sector_context": self._last_sector_context,
+            "lhb_strength_evidence": self._last_lhb_strength_evidence,
+            "lhb_risk_evidence": self._last_lhb_risk_evidence,
+            "strength_evidence": self._build_strength_evidence(),
+            "risk_evidence": self._build_risk_evidence(),
         }
 
         self._save_to_db(ts_code, trade_date, result)
@@ -267,6 +228,7 @@ class RiskBreakdownService:
                 ).first()
                 if stock:
                     return {
+                        "trade_date": trade_date,
                         "change_pct": stock.change_pct or 0,
                         "pre_change_pct": stock.pre_change_pct or 0,
                         "rise_10d_pct": stock.rise_10d_pct or 0,
@@ -371,39 +333,22 @@ class RiskBreakdownService:
             logger.warning(f"获取连板数据失败: {e}")
 
         try:
-            # 涨跌停家数（limit_list_ths 同花顺）
-            df_ths = self.pro.limit_list_ths(trade_date=trade_date)
-            if df_ths is not None and not df_ths.empty:
-                # 兼容不同版本的字段名
-                type_col = None
-                for col in ("limit_type", "type", "status"):
-                    if col in df_ths.columns:
-                        type_col = col
-                        break
-                if type_col:
-                    up_count = len(df_ths[df_ths[type_col].astype(str).str.upper().str.contains("U")])
-                    down_count = len(df_ths[df_ths[type_col].astype(str).str.upper().str.contains("D")])
-                else:
-                    up_count = 0
-                    down_count = 0
+            # 涨跌停/炸板统计统一使用 limit_list_d，避免和同花顺涨停池混口径。
+            df_limit = self.pro.limit_list_d(trade_date=trade_date)
+            if df_limit is not None and not df_limit.empty:
+                limit_col = "limit" if "limit" in df_limit.columns else "limit_type"
+                limits = df_limit[limit_col].astype(str).str.upper() if limit_col in df_limit.columns else []
+                up_count = sum(1 for item in limits if item == "U" or "涨停" in item)
+                down_count = sum(1 for item in limits if item == "D" or "跌停" in item)
+                zhaban_count = sum(1 for item in limits if item == "Z" or "炸" in item)
                 result["limit_up_count"] = int(up_count)
                 result["limit_down_count"] = int(down_count)
-                total = up_count + down_count
-                if total > 0:
+                if up_count + down_count > 0:
                     result["up_down_ratio"] = round(up_count / max(down_count, 1), 2)
+                if len(df_limit) > 0:
+                    result["zhaban_rate"] = round(zhaban_count / len(df_limit) * 100, 1)
         except Exception as e:
-            logger.warning(f"获取涨跌停数据失败: {e}")
-
-        try:
-            # 炸板率（limit_list_d）
-            df_zhaban = self.pro.limit_list_d(trade_date=trade_date)
-            if df_zhaban is not None and not df_zhaban.empty:
-                total_count = len(df_zhaban)
-                zhaban_count = len(df_zhaban[df_zhaban.get("limit", "") == "Z"])
-                if total_count > 0:
-                    result["zhaban_rate"] = round(zhaban_count / total_count * 100, 1)
-        except Exception as e:
-            logger.warning(f"获取炸板数据失败: {e}")
+            logger.warning(f"获取涨跌停/炸板数据失败: {e}")
 
         try:
             # 北向资金净流入（moneyflow_hsgt）
@@ -419,77 +364,22 @@ class RiskBreakdownService:
 
     # ==================== 行业动态映射 ====================
 
-    def _get_ths_industry_code(self, ts_code: str, industry: str) -> Optional[str]:
-        """通过 INDUSTRY_CODE_MAP 获取行业板块代码"""
-        global _THS_INDUSTRY_CACHE
-        if industry in _THS_INDUSTRY_CACHE:
-            return _THS_INDUSTRY_CACHE[industry]
+    def _get_dc_board_candidates(self, ts_code: str, trade_date: str) -> List[Dict[str, Any]]:
+        """从已落库的东财个股-板块关系读取候选板块，缺失时按需刷新单股"""
+        cache_key = f"{ts_code}_{trade_date}"
+        if cache_key in _DC_BOARD_CACHE:
+            return _DC_BOARD_CACHE[cache_key]
 
-        if industry in INDUSTRY_CODE_MAP:
-            _THS_INDUSTRY_CACHE[industry] = INDUSTRY_CODE_MAP[industry]
-            return INDUSTRY_CODE_MAP[industry]
-
-        for ind_key, code in sorted(INDUSTRY_CODE_MAP.items(), key=lambda item: len(item[0]), reverse=True):
-            if ind_key in industry or industry in ind_key:
-                _THS_INDUSTRY_CACHE[industry] = code
-                return code
-
-        _THS_INDUSTRY_CACHE[industry] = None
-        return None
-
-    def _get_ths_board_candidates(self, ts_code: str) -> List[Dict[str, Any]]:
-        """从同花顺成分关系反查股票所属板块，并补齐板块名称和类型"""
-        if ts_code in _THS_BOARD_CACHE:
-            return _THS_BOARD_CACHE[ts_code]
-
-        candidates: List[Dict[str, Any]] = []
-        try:
-            member_df = self.pro.ths_member(
-                con_code=ts_code,
-                fields="ts_code,con_code,con_name,is_new"
-            )
-            if member_df is None or member_df.empty:
-                _THS_BOARD_CACHE[ts_code] = []
-                return []
-
-            index_map: Dict[str, Dict[str, Any]] = {}
-            try:
-                index_df = self.pro.ths_index(fields="ts_code,name,type,count,exchange,list_date")
-                if index_df is not None and not index_df.empty:
-                    for _, row in index_df.iterrows():
-                        code = str(row.get("ts_code", "") or "")
-                        if code:
-                            index_map[code] = {
-                                "name": str(row.get("name", "") or ""),
-                                "type": str(row.get("type", "") or ""),
-                                "count": row.get("count", None),
-                            }
-            except Exception as e:
-                logger.warning(f"获取同花顺板块索引失败: {e}")
-
-            seen: Set[str] = set()
-            for _, row in member_df.iterrows():
-                board_code = str(row.get("ts_code", "") or "")
-                if not board_code or board_code in seen:
-                    continue
-                seen.add(board_code)
-                meta = index_map.get(board_code, {})
-                candidates.append({
-                    "ts_code": board_code,
-                    "name": meta.get("name", ""),
-                    "type": meta.get("type", ""),
-                    "count": meta.get("count"),
-                    "is_new": str(row.get("is_new", "") or ""),
-                    "source": "ths_member",
-                })
-        except Exception as e:
-            logger.warning(f"获取股票同花顺板块失败 {ts_code}: {e}")
-
-        _THS_BOARD_CACHE[ts_code] = candidates
+        candidates = self._board_service.get_stock_boards(
+            ts_code,
+            trade_date=trade_date,
+            refresh_if_missing=True,
+        )
+        _DC_BOARD_CACHE[cache_key] = candidates
         return candidates
 
     def _score_board_candidate(self, board: Dict[str, Any], stock_data: Dict[str, Any]) -> Tuple[int, List[str]]:
-        """根据涨停原因、概念和行业字段给候选板块打分"""
+        """根据新闻主题、涨停原因、概念和行业字段给候选板块打分"""
         score = 0
         reasons: List[str] = []
 
@@ -500,61 +390,97 @@ class RiskBreakdownService:
         concept = str(stock_data.get("concept", "") or "")
         lu_desc = str(stock_data.get("lu_desc", "") or "")
         board_type_text = str(stock_data.get("board_type", "") or "")
+        news_theme = str(stock_data.get("news_theme", "") or "")
 
-        if board.get("is_new") == "Y":
-            score += 3
+        if board.get("source") == "eastmoney":
+            score += 8
 
-        if board_type in BOARD_TYPE_PRIORITY:
-            score += BOARD_TYPE_PRIORITY[board_type]
+        if "概念" in board_type:
+            score += 8
+        elif "行业" in board_type:
+            score += 4
+        elif "地域" in board_type:
+            score -= 12
 
-        for source_text, label in (
-            (lu_desc, "涨停原因"),
-            (concept, "概念字段"),
-            (board_type_text, "板块字段"),
+        for source_text, label, exact_weight, fuzzy_weight in (
+            (news_theme, "新闻主题", 160, 110),
+            (lu_desc, "涨停原因", 120, 85),
+            (concept, "概念字段", 55, 35),
+            (board_type_text, "板块字段", 45, 30),
         ):
             clean_text = _clean_board_text(source_text)
             matched = False
             for idx, term in enumerate(_split_board_terms(source_text)):
                 clean_term = _clean_board_text(term)
                 if clean_name and clean_term and clean_name == clean_term:
-                    score += 90 + max(0, 30 - idx * 5)
+                    score += exact_weight + max(0, 30 - idx * 5)
                     reasons.append(f"{label}优先命中{board_name}")
                     matched = True
                     break
             if matched:
                 continue
             if clean_name and clean_name in clean_text:
-                score += 80
+                score += fuzzy_weight
                 reasons.append(f"{label}命中{board_name}")
                 continue
             for term in _split_board_terms(source_text):
                 clean_term = _clean_board_text(term)
                 if clean_name and clean_term and (clean_term in clean_name or clean_name in clean_term):
-                    score += 50
+                    score += max(20, fuzzy_weight - 15)
                     reasons.append(f"{label}匹配{term}")
                     break
 
         clean_industry = _clean_board_text(industry)
         if clean_name and clean_industry:
             if clean_name == clean_industry:
-                score += 55
+                score += 50
                 reasons.append(f"行业精确匹配{industry}")
             elif clean_industry in clean_name or clean_name in clean_industry:
-                score += 35
+                score += 30
                 reasons.append(f"行业模糊匹配{industry}")
 
         return score, reasons
 
-    def _resolve_sector_board(self, ts_code: str, stock_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """优先按同花顺成分关系匹配当日主线板块，失败后使用静态行业映射兜底"""
-        industry = str(stock_data.get("industry", "") or "")
-        candidates = self._get_ths_board_candidates(ts_code)
+    def _resolve_sector_board(self, ts_code: str, stock_data: Dict[str, Any], trade_date: str) -> Optional[Dict[str, Any]]:
+        """优先按新闻主题/涨停标签归一到东财板块，再用成分关系确认和兜底。"""
+        enriched_stock_data = dict(stock_data)
+        attribution = self._get_cached_theme_attribution_for_risk(ts_code, trade_date)
+        if attribution:
+            enriched_stock_data["news_theme"] = attribution.get("primary_theme") or ""
+
+        candidates = self._get_dc_board_candidates(ts_code, trade_date)
+        by_code = {str(board.get("ts_code", "") or ""): board for board in candidates}
+        by_name = {_clean_board_text(str(board.get("name", "") or "")): board for board in candidates}
+
+        priority_sources = [
+            ("news_theme", "news_theme"),
+            ("lu_desc", "limit_tag"),
+            ("concept", "selected_concept"),
+            ("board_type", "selected_board_type"),
+            ("industry", "selected_industry"),
+        ]
+
+        for key, source in priority_sources:
+            text = str(enriched_stock_data.get(key, "") or "")
+            for match in self._board_service.normalize_board_terms(text, source=source, top_n=3):
+                code = str(match.get("ts_code", "") or "")
+                clean_name = _clean_board_text(str(match.get("name", "") or ""))
+                member = by_code.get(code) or by_name.get(clean_name)
+                if member:
+                    result = dict(member)
+                    result.update({
+                        "ts_code": code or member.get("ts_code"),
+                        "name": match.get("name") or member.get("name"),
+                        "type": match.get("type") or member.get("type", ""),
+                        "source": "eastmoney",
+                        "match_score": match.get("match_score", 0),
+                        "matched_from": match.get("matched_from", source),
+                    })
+                    return result
 
         best: Optional[Dict[str, Any]] = None
         for board in candidates:
-            if board.get("is_new") and board.get("is_new") != "Y":
-                continue
-            score, reasons = self._score_board_candidate(board, stock_data)
+            score, reasons = self._score_board_candidate(board, enriched_stock_data)
             if score <= 0:
                 continue
             enriched = dict(board)
@@ -566,16 +492,6 @@ class RiskBreakdownService:
         if best:
             return best
 
-        fallback_code = self._get_ths_industry_code(ts_code, industry)
-        if fallback_code:
-            return {
-                "ts_code": fallback_code,
-                "name": industry,
-                "type": "I",
-                "match_score": 1,
-                "match_reasons": ["静态行业映射兜底"],
-                "source": "industry_map",
-            }
         return None
 
     # ==================== 维度计算 ====================
@@ -664,23 +580,22 @@ class RiskBreakdownService:
             tips.append(f"北向净流出{abs(north_money):.0f}百万")
 
         # -- 行业板块表现纳入行情风险 --
-        board = self._resolve_sector_board(ts_code, stock_data)
+        board = self._resolve_sector_board(ts_code, stock_data, trade_date)
         if board:
             try:
-                df_ind = self.pro.ths_daily(ts_code=board["ts_code"], trade_date=trade_date)
-                if df_ind is not None and not df_ind.empty:
-                    ind_pct = float(df_ind.iloc[0].get("pct_change", 0) or 0)
-                    board_name = board.get("name") or board.get("ts_code")
-                    if ind_pct < -3:
-                        score += 2
-                        tips.append(f"{board_name}下跌{ind_pct:.2f}%，板块走弱")
-                    elif ind_pct < -1:
-                        score += 1
-                        tips.append(f"{board_name}下跌{ind_pct:.2f}%")
+                daily = self._board_service.get_board_daily(board["ts_code"], trade_date)
+                ind_pct = float(daily.get("pct_chg", 0) or 0)
+                board_name = board.get("name") or board.get("ts_code")
+                if ind_pct < -3:
+                    score += 2
+                    tips.append(f"{board_name}下跌{ind_pct:.2f}%，板块走弱")
+                elif ind_pct < -1:
+                    score += 1
+                    tips.append(f"{board_name}下跌{ind_pct:.2f}%")
             except Exception:
                 pass
 
-        return min(score, 12), tips[:5]
+        return min(score, RISK_WEIGHTS["market"]), tips[:5]
 
     def _calc_chip_risk(self, ts_code: str, trade_date: str,
                         stock_data: Dict) -> Tuple[int, List[str]]:
@@ -768,49 +683,97 @@ class RiskBreakdownService:
         """资金风险计算"""
         score = 0
         tips = []
+        net_mf = None
+        net_label = "主力"
         try:
-            df = self.pro.moneyflow(ts_code=ts_code, trade_date=trade_date)
+            df = self.pro.moneyflow_dc(ts_code=ts_code, trade_date=trade_date)
             if df is not None and not df.empty:
                 row = df.iloc[0]
-                net_mf = float(row.get("net_mf_amount", 0) or 0)
-                if net_mf < -5000:
-                    score += 15
-                    tips.append(f"主力净流出{abs(net_mf):.0f}万元，资金出逃明显")
-                elif net_mf < -2000:
-                    score += 8
-                    tips.append(f"主力净流出{abs(net_mf):.0f}万元")
-                elif net_mf < -500:
-                    score += 4
-                    tips.append(f"主力净流出{abs(net_mf):.0f}万元")
-                elif net_mf > 5000:
-                    score -= 3
+                buy_elg = row.get("buy_elg_amount")
+                sell_elg = row.get("sell_elg_amount")
+                if buy_elg is not None and sell_elg is not None:
+                    net_mf = float(buy_elg or 0) - float(sell_elg or 0)
+                    net_label = "超大单"
+                else:
+                    net_mf = float(row.get("net_mf_amount", 0) or 0)
         except Exception as e:
-            logger.warning(f"获取资金流向失败 {ts_code}: {e}")
+            logger.warning(f"获取东财资金流向失败 {ts_code}: {e}")
 
-        return min(max(score, 0), 20), tips[:2]
+        if net_mf is None:
+            try:
+                df = self.pro.moneyflow(ts_code=ts_code, trade_date=trade_date)
+                if df is not None and not df.empty:
+                    row = df.iloc[0]
+                    net_mf = float(row.get("net_mf_amount", 0) or 0)
+                    net_label = "主力"
+            except Exception as e:
+                logger.warning(f"获取资金流向失败 {ts_code}: {e}")
+
+        if net_mf is not None:
+            if net_mf < -5000:
+                score += 10
+                tips.append(f"{net_label}净流出{abs(net_mf):.0f}万元，资金出逃明显")
+            elif net_mf < -2000:
+                score += 6
+                tips.append(f"{net_label}净流出{abs(net_mf):.0f}万元")
+            elif net_mf < -500:
+                score += 3
+                tips.append(f"{net_label}净流出{abs(net_mf):.0f}万元")
+            elif net_mf > 5000:
+                score -= 2
+
+        return min(max(score, 0), RISK_WEIGHTS["capital"]), tips[:2]
 
     def _calc_lhb_risk(self, ts_code: str, trade_date: str) -> Tuple[int, List[str]]:
         """龙虎风险计算（席位升级）"""
         score = 0
         tips = []
+        self._last_lhb_strength_evidence = []
+        self._last_lhb_risk_evidence = []
 
         from backend.services.lhb_service import analyze_lhb
-        from backend.services.seat_library import get_seat_risk_score, is_premium_seat
+        from backend.services.seat_library import get_seat_risk_score, match_seat_tag
         try:
             lhb_data = analyze_lhb(ts_code, trade_date, force_refresh=False)
             if lhb_data.get("data_status") == "available":
                 action_tag = lhb_data.get("action_tag", "")
                 net_amount = lhb_data.get("net_amount", 0) or 0
+                buy_top5 = lhb_data.get("buy_top5", [])
+                sell_top5 = lhb_data.get("sell_top5", [])
+
+                premium_buy_seats = [
+                    seat.get("exalter", "")
+                    for seat in buy_top5
+                    if match_seat_tag(seat.get("exalter", ""))[0] == "高溢价"
+                ]
+                dump_sell_seats = [
+                    seat.get("exalter", "")
+                    for seat in sell_top5
+                    if match_seat_tag(seat.get("exalter", ""))[0] in ("核按钮", "量化", "散户")
+                ]
+                if premium_buy_seats:
+                    self._last_lhb_strength_evidence.append({
+                        "type": "premium_buy",
+                        "label": "高溢价席位买入",
+                        "seats": premium_buy_seats[:5],
+                        "score_effect": "抵扣龙虎风险，进入强势依据",
+                    })
+                if dump_sell_seats:
+                    self._last_lhb_risk_evidence.append({
+                        "type": "dump_sell",
+                        "label": "砸盘席位卖出",
+                        "seats": dump_sell_seats[:5],
+                        "score_effect": "增加龙虎风险",
+                    })
 
                 # 席位标签风险评分（独立计算，用于评分）
-                for seat_list, label in [(lhb_data.get("buy_top5", []), "买入"),
-                                          (lhb_data.get("sell_top5", []), "卖出")]:
+                for seat_list, label in [(buy_top5, "买入"), (sell_top5, "卖出")]:
                     for seat in seat_list:
                         exalter = seat.get("exalter", "")
                         seat_risk = get_seat_risk_score(exalter)
                         if seat_risk > 0:
                             score += seat_risk
-                        elif seat_risk < 0 and is_premium_seat(exalter):
+                        elif seat_risk < 0:
                             score += seat_risk
 
                 # 核按钮提示使用 lhb_service.risk_tips（与龙虎榜面板共享数据源）
@@ -837,6 +800,22 @@ class RiskBreakdownService:
             logger.warning(f"获取龙虎风险失败 {ts_code}: {e}")
 
         return min(max(score, 0), 12), tips[:3]
+
+    def _build_strength_evidence(self) -> List[str]:
+        evidence: List[str] = []
+        for item in self._last_lhb_strength_evidence:
+            seats = "、".join(item.get("seats", [])[:5])
+            if seats:
+                evidence.append(f"{item.get('label', '强势席位')}：{seats}")
+        return evidence
+
+    def _build_risk_evidence(self) -> List[str]:
+        evidence: List[str] = []
+        for item in self._last_lhb_risk_evidence:
+            seats = "、".join(item.get("seats", [])[:5])
+            if seats:
+                evidence.append(f"{item.get('label', '风险席位')}：{seats}")
+        return evidence
 
     def _calc_technical_risk(self, ts_code: str, trade_date: str) -> Tuple[int, List[str]]:
         """技术面风险计算（stk_factor_pro）18分
@@ -946,57 +925,112 @@ class RiskBreakdownService:
         return min(score, 18), tips[:4]
 
     def _calc_sector_risk(self, ts_code: str, stock_data: Dict[str, Any], trade_date: str) -> Tuple[int, List[str]]:
-        """板块风险计算（同花顺成分关系精准匹配，静态行业映射兜底）"""
+        """板块与题材风险计算（东财板块体系）"""
         score = 0
         tips = []
+        self._last_sector_context = {}
         industry = str(stock_data.get("industry", "") or "")
         if not industry and not stock_data.get("lu_desc") and not stock_data.get("concept"):
             return 0, []
 
-        board = self._resolve_sector_board(ts_code, stock_data)
+        board = self._resolve_sector_board(ts_code, stock_data, trade_date)
         if not board:
-            tips.append(f"行业({industry})暂未匹配到板块数据")
+            tips.append("暂无板块行情数据")
             return 0, tips
 
-        idx_code = board["ts_code"]
-        board_name = board.get("name") or industry or idx_code
-        tips.append(f"匹配板块：{board_name}({idx_code})")
+        board_code = board["ts_code"]
+        board_name = board.get("name") or industry or board_code
 
-        # 板块行情
+        daily = self._board_service.get_board_daily(board_code, trade_date)
+        moneyflow = self._board_service.get_board_moneyflow(board_code, trade_date)
+        strength = self._board_service.get_board_strength(board_code, trade_date)
+
+        pct = float(daily.get("pct_chg", 0) or 0)
+        if pct <= -3:
+            score += 5
+            tips.append(f"{board_name}板块下跌{abs(pct):.1f}%，题材明显走弱")
+        elif pct <= -1.5:
+            score += 3
+            tips.append(f"{board_name}板块下跌{abs(pct):.1f}%，题材承接转弱")
+        elif pct <= -0.5:
+            score += 1
+            tips.append(f"{board_name}板块小幅走弱")
+        elif pct >= 3:
+            score -= 2
+
+        net_yi = float(moneyflow.get("net_amount_yi", 0) or 0)
+        if net_yi <= -5:
+            score += 4
+            tips.append(f"板块资金净流出{abs(net_yi):.1f}亿")
+        elif net_yi <= -2:
+            score += 2
+            tips.append(f"板块资金净流出{abs(net_yi):.1f}亿")
+        elif net_yi >= 5:
+            score -= 2
+
+        limit_up_count = int(strength.get("limit_up_count", 0) or 0)
+        member_count = int(strength.get("member_count", 0) or 0)
+        limit_up_ratio = limit_up_count / member_count if member_count else 0
+        if limit_up_count == 0 and member_count:
+            score += 4
+            tips.append("板块内暂无涨停，题材扩散不足")
+        elif limit_up_count <= 2 and member_count >= 30:
+            score += 2
+            tips.append(f"板块内涨停扩散不足，仅{limit_up_count}家涨停")
+        elif limit_up_ratio >= 0.05:
+            score -= 2
+
+        stock_change_pct = float(stock_data.get("change_pct", 0) or 0)
+        board_pct = float(strength.get("board_pct_chg", pct) or pct)
+        if board_pct > 1 and stock_change_pct < board_pct:
+            score += 1
+            tips.append("个股表现弱于主线板块")
+
+        strength_score = float(strength.get("strength_score", 0) or 0)
+        if strength_score and strength_score < 35:
+            score += 2
+            tips.append("板块热度回落，题材承接偏弱")
+
+        self._last_sector_context = {
+            "primary_board": {
+                "code": board_code,
+                "name": board_name,
+                "source": "eastmoney",
+            },
+            "board_pct_chg": pct,
+            "money_net_amount": moneyflow.get("net_amount", 0) or 0,
+            "money_net_amount_yi": net_yi,
+            "limit_up_count": limit_up_count,
+            "member_count": member_count,
+            "strength_score": strength_score,
+        }
+
+        attribution = self._get_cached_theme_attribution_for_risk(ts_code, trade_date)
+        if attribution:
+            tips = self._append_theme_attribution_tips(tips, attribution)
+
+        return min(max(score, 0), RISK_WEIGHTS["sector"]), tips[:6]
+
+    @staticmethod
+    def _get_cached_theme_attribution_for_risk(ts_code: str, trade_date: str) -> Dict[str, Any]:
         try:
-            df = self.pro.ths_daily(ts_code=idx_code, trade_date=trade_date)
-            if df is not None and not df.empty:
-                pct = float(df.iloc[0].get("pct_change", 0) or 0)
-                if pct < -3:
-                    score += 5
-                    tips.append(f"{board_name}下跌{pct:.2f}%")
-                elif pct < -1:
-                    score += 3
-                    tips.append(f"{board_name}下跌{pct:.2f}%")
-                elif pct > 3:
-                    score -= 2
+            from backend.services.integrated_news_service import get_integrated_news_service
+            svc = get_integrated_news_service()
+            try:
+                return svc.get_cached_stock_theme_attribution(ts_code, trade_date) or {}
+            finally:
+                svc.close()
         except Exception as e:
-            logger.warning(f"获取板块行情失败 {idx_code}: {e}")
+            logger.debug(f"读取主题归因缓存失败，风险拆解降级忽略: {e}")
+            return {}
 
-        # 行业/概念资金流向（同花顺）
-        try:
-            if board.get("type") == "I":
-                df_fund = self.pro.moneyflow_ind_ths(ts_code=idx_code, trade_date=trade_date)
-            else:
-                df_fund = self.pro.moneyflow_cnt_ths(ts_code=idx_code, trade_date=trade_date)
-            if df_fund is not None and not df_fund.empty:
-                row = df_fund.iloc[0]
-                net_amount = float(row.get("net_amount", 0) or 0)
-                if net_amount < -5:
-                    score += 5
-                    tips.append(f"{board_name}资金净流出{abs(net_amount):.1f}亿")
-                elif net_amount < -2:
-                    score += 2
-                    tips.append(f"{board_name}资金净流出{abs(net_amount):.1f}亿")
-        except Exception as e:
-            logger.warning(f"获取板块资金流向失败 {idx_code}: {e}")
-
-        return min(max(score, 0), 10), tips[:3]
+    @staticmethod
+    def _append_theme_attribution_tips(tips: List[str], attribution: Dict[str, Any]) -> List[str]:
+        result = list(tips or [])
+        for line in attribution.get("explanation_lines", [])[:3]:
+            if line and line not in result:
+                result.append(line)
+        return result[:6]
 
     # ==================== 数据库读写 ====================
 
@@ -1112,6 +1146,11 @@ class RiskBreakdownService:
             "lhb_tips": load_json(record.lhb_tips),
             "sector_tips": load_json(record.sector_tips),
             "technical_tips": technical_tips,
+            "sector_context": {},
+            "lhb_strength_evidence": [],
+            "lhb_risk_evidence": [],
+            "strength_evidence": [],
+            "risk_evidence": [],
         }
 
     def _fallback_empty(self, trade_date: str) -> Dict:
@@ -1124,6 +1163,11 @@ class RiskBreakdownService:
             "market_tips": [], "chip_tips": [],
             "news_tips": [], "capital_tips": [],
             "lhb_tips": [], "sector_tips": [], "technical_tips": [],
+            "sector_context": {},
+            "lhb_strength_evidence": [],
+            "lhb_risk_evidence": [],
+            "strength_evidence": [],
+            "risk_evidence": [],
             "risk_summary": "数据源未配置", "warning_tip": "",
             "trade_date": trade_date,
         }

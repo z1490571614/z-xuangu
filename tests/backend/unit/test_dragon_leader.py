@@ -76,6 +76,20 @@ class TestAnnouncementAlpha:
         result = calculate_announcement_alpha(news)
         assert result["bad_news_score"] == 0
 
+    def test_roundup_news_not_assigned_to_stock_risk(self):
+        """新闻精选合集不能直接归因为个股监管风险"""
+        news = [{
+            "title": "财联社5月7日晚间新闻精选",
+            "content": "证监会表示加强监管。金螳螂：一季度净利润同比下降。",
+            "stock_name": "金螳螂",
+            "ts_code": "002081.SZ",
+            "source": "cls",
+        }]
+        result = calculate_announcement_alpha(news)
+        assert result["bad_news_score"] == 0
+        assert result["dimension_scores"]["regulatory"] == 0
+        assert not result.get("dimension_tips")
+
     def test_directional_negation_同比下降(self):
         """"同比下降"经由SentimentAnalyzer判定为negative"""
         news = [{"title": "净利润1421万元同比下降57%", "sentiment_type": "negative", "sentiment_score": 0.85}]
@@ -268,6 +282,161 @@ class TestPhase2ThemeScoring:
         assert score > broad_score
         assert any("语义命中" in reason for reason in reasons)
 
+    def test_theme_rank_matches_hot_board_by_lu_desc_before_stock_membership(self, monkeypatch):
+        """题材排名优先用行业概览板块与涨停原因直连，不让所属成分板块5G抢主线"""
+        from backend.services.dragon_leader.data.theme_context import ThemeContext
+        ctx = ThemeContext()
+
+        monkeypatch.setattr(ctx, "get_stock_concepts", lambda ts_code, trade_date: [
+            {"ts_code": "885556.TI", "name": "5G", "type": "N"},
+        ])
+        monkeypatch.setattr(ctx, "_get_stock_theme_hints", lambda ts_code, trade_date: {
+            "industry": "通信设备",
+            "concept": "",
+            "lu_desc": "算力租赁+通信运维+5G消息+亏损收窄",
+            "board_type": "",
+        })
+        monkeypatch.setattr(ctx, "get_hot_boards", lambda trade_date: [
+            {"rank": 1, "name": "5G", "ts_code": "885556.TI", "up_nums": 12, "cons_nums": 2, "days": 3},
+            {"rank": 12, "name": "算力租赁", "ts_code": "886050.TI", "up_nums": 4, "cons_nums": 1, "days": 2},
+        ])
+        monkeypatch.setattr(ctx._board_service, "normalize_board_terms", lambda text, source="", top_n=5: [
+            {"ts_code": "886050.TI", "name": "算力租赁", "type": "N", "match_score": 120, "matched_from": source}
+        ] if source == "limit_tag" and "算力租赁" in text else [])
+
+        result = ctx.get_stock_theme_rank("000889.SZ", "20260508")
+
+        assert result["best_name"] == "算力租赁"
+        assert result["primary_board"]["matched_from"] == "limit_tag_board"
+
+    def test_direct_lu_desc_hot_board_excludes_membership_only_huawei(self, monkeypatch):
+        """合力泰：涨停原因直连算力租赁时，不用所属成分板块华为概念抢主线"""
+        from backend.services.dragon_leader.data.theme_context import ThemeContext
+        ctx = ThemeContext()
+
+        monkeypatch.setattr(ctx, "get_stock_concepts", lambda ts_code, trade_date: [
+            {"ts_code": "885806.TI", "name": "华为概念", "type": "N"},
+        ])
+        monkeypatch.setattr(ctx, "_get_stock_theme_hints", lambda ts_code, trade_date: {
+            "industry": "元器件",
+            "concept": "",
+            "lu_desc": "算力租赁+电子纸+福建国资",
+            "board_type": "",
+        })
+        monkeypatch.setattr(ctx, "get_hot_boards", lambda trade_date: [
+            {"rank": 1, "name": "华为概念", "ts_code": "885806.TI", "up_nums": 20, "cons_nums": 4, "days": 5},
+            {"rank": 15, "name": "算力租赁", "ts_code": "886050.TI", "up_nums": 4, "cons_nums": 1, "days": 2},
+        ])
+        monkeypatch.setattr(ctx._board_service, "normalize_board_terms", lambda text, source="", top_n=5: [
+            {"ts_code": "886050.TI", "name": "算力租赁", "type": "N", "match_score": 120, "matched_from": source}
+        ] if source == "limit_tag" and "算力租赁" in text else [])
+
+        result = ctx.get_stock_theme_rank("002217.SZ", "20260508")
+
+        assert result["best_name"] == "算力租赁"
+        assert all(board["matched_from"] == "limit_tag_board" for board in result["hot_boards"])
+
+    def test_exact_lu_desc_theme_beats_generic_ai_alias(self):
+        """中嘉博创：算力租赁精确标签优先于算力泛化出来的人工智能"""
+        from backend.services.dragon_leader.data.theme_context import ThemeContext
+        ctx = ThemeContext()
+
+        exact_score, exact_reasons = ctx._theme_match_score(
+            {"name": "算力租赁", "rank": 15},
+            {"lu_desc": "算力租赁+通信运维+5G消息+亏损收窄", "concept": "", "board_type": "", "industry": "通信设备"},
+        )
+        generic_score, generic_reasons = ctx._theme_match_score(
+            {"name": "人工智能", "rank": 1},
+            {"lu_desc": "算力租赁+通信运维+5G消息+亏损收窄", "concept": "", "board_type": "", "industry": "通信设备"},
+        )
+
+        assert exact_score > generic_score
+        assert any("优先命中算力租赁" in reason for reason in exact_reasons)
+
+    def test_5g_message_does_not_fuzzy_match_5g_board(self):
+        """5G消息不能被短词模糊成5G主线"""
+        from backend.services.dragon_leader.data.theme_context import ThemeContext
+        ctx = ThemeContext()
+
+        score, reasons = ctx._theme_match_score(
+            {"name": "5G", "rank": 9},
+            {"lu_desc": "算力租赁+通信运维+5G消息+亏损收窄", "concept": "", "board_type": "", "industry": "通信设备"},
+        )
+
+        assert not reasons
+        assert score == 21
+
+    def test_exact_lu_desc_uses_stock_board_code_when_hot_board_missing(self, monkeypatch):
+        """行业概览缺少886050时，涨停原因精确写算力租赁仍可命中该板块代码"""
+        from backend.services.dragon_leader.data.theme_context import ThemeContext
+        ctx = ThemeContext()
+
+        monkeypatch.setattr(ctx, "get_stock_concepts", lambda ts_code, trade_date: [
+            {"ts_code": "885556.TI", "name": "5G", "type": "N"},
+            {"ts_code": "886050.TI", "name": "算力租赁", "type": "N"},
+        ])
+        monkeypatch.setattr(ctx, "_get_stock_theme_hints", lambda ts_code, trade_date: {
+            "industry": "通信设备",
+            "concept": "",
+            "lu_desc": "算力租赁+通信运维+5G消息+亏损收窄",
+            "board_type": "",
+        })
+        monkeypatch.setattr(ctx, "get_hot_boards", lambda trade_date: [
+            {"rank": 2, "name": "人工智能", "ts_code": "885728.TI", "up_nums": 29, "cons_nums": 7, "days": 9},
+            {"rank": 9, "name": "5G", "ts_code": "885556.TI", "up_nums": 18, "cons_nums": 7, "days": 3},
+        ])
+        monkeypatch.setattr(ctx._board_service, "normalize_board_terms", lambda text, source="", top_n=5: [])
+
+        result = ctx.get_stock_theme_rank("000889.SZ", "20260508")
+
+        assert result["best_name"] == "算力租赁"
+        assert result["primary_board"]["ts_code"] == "886050.TI"
+        assert result["primary_board"]["matched_from"] == "exact_lu_desc_board"
+
+    def test_news_theme_dictionary_match_precedes_limit_tag(self, monkeypatch):
+        """新闻提取主题先过同花顺词典归一，并优先于涨停标签"""
+        from backend.services.dragon_leader.data.theme_context import ThemeContext
+        ctx = ThemeContext()
+
+        monkeypatch.setattr(ctx, "get_stock_concepts", lambda ts_code, trade_date: [])
+        monkeypatch.setattr(ctx, "get_hot_boards", lambda trade_date: [])
+        monkeypatch.setattr(ctx, "_get_stock_theme_hints", lambda ts_code, trade_date: {
+            "news_theme": "智算租赁服务",
+            "industry": "通信设备",
+            "concept": "",
+            "lu_desc": "5G消息+通信运维",
+            "board_type": "",
+        })
+
+        def fake_normalize(text, source="", top_n=5):
+            if source == "news_theme":
+                return [{
+                    "ts_code": "886050.TI",
+                    "name": "算力租赁",
+                    "type": "N",
+                    "match_score": 88,
+                    "matched_from": source,
+                    "match_reasons": ["新闻主题模糊归一到算力租赁"],
+                }]
+            if source == "limit_tag":
+                return [{
+                    "ts_code": "885556.TI",
+                    "name": "5G",
+                    "type": "N",
+                    "match_score": 100,
+                    "matched_from": source,
+                    "match_reasons": ["涨停标签精确归一到5G"],
+                }]
+            return []
+
+        monkeypatch.setattr(ctx._board_service, "normalize_board_terms", fake_normalize)
+
+        result = ctx.get_stock_theme_rank("000889.SZ", "20260508")
+
+        assert result["best_name"] == "算力租赁"
+        assert result["primary_board"]["ts_code"] == "886050.TI"
+        assert result["primary_board"]["matched_from"] == "news_theme_board"
+
     def test_theme_strength_with_hot_board(self):
         """题材强度评分：题材上榜排名靠前"""
         from backend.services.dragon_leader.scorer.leader_scorer import calculate_theme_strength
@@ -287,13 +456,84 @@ class TestPhase2ThemeScoring:
         assert result["score"] >= 15
         assert result["data_status"] == "available"
 
+    def test_theme_strength_shows_exact_lu_desc_board_without_hot_rank(self):
+        """涨停原因精确板块未进热榜时，也应展示为主跟随题材"""
+        from backend.services.dragon_leader.scorer.leader_scorer import calculate_theme_strength
+        ctx = {"theme": {"theme_rank": {
+            "best_rank": 999,
+            "best_name": "算力租赁",
+            "board_count": 1,
+            "primary_board": {"name": "算力租赁", "matched_from": "exact_lu_desc_board"},
+            "hot_boards": [{"name": "算力租赁", "rank": 999, "matched_from": "exact_lu_desc_board"}],
+            "all_concepts": [{"name": "5G"}, {"name": "华为概念"}],
+        }}}
+
+        result = calculate_theme_strength(ctx)
+
+        assert result["data_status"] == "available"
+        assert any("主跟随题材：算力租赁，涨停原因确认" in tip for tip in result["tips"])
+
+    def test_theme_strength_shows_dictionary_limit_tag_board_without_hot_rank(self):
+        """涨停标签经同花顺词典归一后，无热榜排名也应展示主线"""
+        from backend.services.dragon_leader.scorer.leader_scorer import calculate_theme_strength
+        ctx = {"theme": {"theme_rank": {
+            "best_rank": 999,
+            "best_name": "算力租赁",
+            "board_count": 1,
+            "primary_board": {"name": "算力租赁", "matched_from": "limit_tag_board"},
+            "hot_boards": [{"name": "算力租赁", "rank": 999, "matched_from": "limit_tag_board"}],
+            "all_concepts": [{"name": "5G"}],
+        }}}
+
+        result = calculate_theme_strength(ctx)
+
+        assert result["data_status"] == "available"
+        assert any("主跟随题材：算力租赁，涨停标签确认" in tip for tip in result["tips"])
+        assert not any("归一命中" in tip for tip in result["tips"])
+
+    def test_dictionary_primary_keeps_hot_board_strength_followups(self, monkeypatch):
+        """归一结果定主线后，热榜题材仍参与强度和持续性判断"""
+        from backend.services.dragon_leader.data.theme_context import ThemeContext
+        from backend.services.dragon_leader.scorer.leader_scorer import calculate_theme_strength
+        ctx = ThemeContext()
+
+        monkeypatch.setattr(ctx, "get_stock_concepts", lambda ts_code, trade_date: [])
+        monkeypatch.setattr(ctx, "_get_stock_theme_hints", lambda ts_code, trade_date: {
+            "news_theme": "",
+            "industry": "通信设备",
+            "concept": "",
+            "lu_desc": "算力租赁+通信运维+5G消息",
+            "board_type": "",
+        })
+        monkeypatch.setattr(ctx, "get_hot_boards", lambda trade_date: [
+            {"rank": 2, "name": "人工智能", "ts_code": "885728.TI", "up_nums": 29, "cons_nums": 7, "days": 9},
+        ])
+        monkeypatch.setattr(ctx._board_service, "normalize_board_terms", lambda text, source="", top_n=5: [
+            {"ts_code": "886050.TI", "name": "算力租赁", "type": "N", "match_score": 120, "matched_from": source}
+        ] if source == "limit_tag" and "算力租赁" in text else [])
+
+        theme_rank = ctx.get_stock_theme_rank("000889.SZ", "20260508")
+        result = calculate_theme_strength({"theme": {"theme_rank": theme_rank}})
+
+        assert theme_rank["best_name"] == "算力租赁"
+        assert any(board.get("name") == "人工智能" for board in theme_rank["hot_boards"])
+        assert any("人工智能涨停29家，板块效应强" in tip for tip in result["tips"])
+        assert any("人工智能持续9天，题材有持续性" in tip for tip in result["tips"])
+        assert result["tips"][1] == "人工智能涨停29家，板块效应强"
+
     def test_theme_strength_no_match(self):
         """题材强度评分：未上榜"""
         from backend.services.dragon_leader.scorer.leader_scorer import calculate_theme_strength
-        ctx = {"theme": {"theme_rank": {"best_rank": 999, "board_count": 0, "hot_boards": []}}}
+        ctx = {"theme": {"theme_rank": {
+            "best_rank": 999,
+            "board_count": 0,
+            "hot_boards": [],
+            "all_concepts": [{"name": "芯片概念"}, {"name": "人工智能"}],
+        }}}
         result = calculate_theme_strength(ctx)
         assert result["data_status"] == "insufficient_data"
         assert not any("未进入" in tip for tip in result["tips"])
+        assert any("所属题材：芯片概念、人工智能" in tip for tip in result["tips"])
 
     def test_sector_ladder_strong(self):
         """板块梯队评分：梯队完整"""
@@ -358,6 +598,7 @@ class TestPhase2ThemeScoring:
         }
         result = calculate_ladder_break(ctx)
         assert result["score"] >= 5
+        assert not any("新上榜首日爆发" in tip for tip in result["tips"])
 
 
 # ===================== 阶段3：基本面/ST/减持/分时测试 =====================

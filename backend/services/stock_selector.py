@@ -2,6 +2,7 @@
 三阶段选股服务
 """
 import logging
+import os
 from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
 import time
@@ -15,9 +16,18 @@ from backend.services.tdx_selector import (
     create_aggressive_task,
     TASK_TEMPLATES,
 )
+try:
+    from backend.services.tdx_mcp_client import McpTemporaryUnavailable
+except Exception:
+    class McpTemporaryUnavailable(RuntimeError):
+        pass
 from backend.services.data_collector import TushareDataCollector
 from backend.services.seal_rate_calculator import SealRateCalculator
-from backend.models import SelectionRecord, SelectedStock
+from backend.services.scoring.rule_score_service import RuleScoreService
+from backend.services.scoring.next_day_plan import NextDayPlanService
+from backend.services.model_engine.lightgbm_service import batch_predict_before_selection
+from backend.services.scoring_v2 import StockScoringV2Service, is_score_v2_enabled
+from backend.models import SelectionRecord, SelectedStock, StockFeatureSnapshot
 from backend.database import SessionLocal
 from backend.core.logging_config import get_selection_logger
 
@@ -72,7 +82,7 @@ class StockSelectorService:
             tasks = [TASK_TEMPLATES.get(task_template, create_default_task)()]
 
         # ========== 阶段1：通达信 MCP 选股 ==========
-        phase1 = self._execute_phase1(tasks, tdx_mcp_func)
+        phase1 = self._execute_phase1(tasks, tdx_mcp_func, trade_date)
         sel_logger.mcp_call_end(
             phase1.data.get("total_count", 0) if phase1.data else 0,
             phase1.execution_time * 1000
@@ -103,6 +113,13 @@ class StockSelectorService:
             phase1.data, phase2.data, phase3.data if phase3 else None, min_open_change_pct, min_seal_rate
         )
 
+        # 丰富数据：获取同花顺涨停榜单 + 上一日换手率
+        if final_stocks:
+            try:
+                self._enrich_with_limit_list_ths(final_stocks, trade_date)
+            except Exception as e:
+                logger.warning(f"丰富涨停榜单数据失败（不影响主流程）: {e}")
+
         logger.info(
             f"========== 三阶段选股完成：阶段1选出 {phase1.data.get('total_count', 0)} 只，"
             f"最终通过 {len(final_stocks)} 只，总耗时 {time.time() - overall_start:.2f}秒 =========="
@@ -119,36 +136,101 @@ class StockSelectorService:
         )
 
     def _execute_phase1(
-        self, tasks: List[SelectionTask], tdx_mcp_func: Optional[Callable]
+        self, tasks: List[SelectionTask], tdx_mcp_func: Optional[Callable],
+        trade_date: Optional[str] = None,
     ) -> PhaseResult:
-        """执行阶段1：通达信 MCP 选股"""
-        result = PhaseResult(phase_name="选股", source="tdx_mcp")
+        """执行阶段1：通达信 MCP 选股（支持降级到本地数据）"""
         phase_start = time.time()
+        enable_fallback = os.getenv("ENABLE_LOCAL_FALLBACK", "true").lower() == "true"
+        force_fallback = False
 
-        if tdx_mcp_func is None:
-            logger.warning("未提供通达信 MCP 函数，阶段1返回空结果")
-            result.data = {"stocks": [], "total_count": 0}
-            result.success = True
+        # ─── 优先尝试 MCP ───
+        if tdx_mcp_func is not None:
+            result = PhaseResult(phase_name="选股", source="tdx_mcp")
+            try:
+                logger.info("========== 阶段1：通达信 MCP 选股 ==========")
+                for i, task in enumerate(tasks):
+                    self.tdx_selector.add_task(task)
+
+                selection_result = self.tdx_selector.select(tdx_mcp_func=tdx_mcp_func)
+                total_count = selection_result.get("total_count", 0)
+
+                if total_count > 0:
+                    result.data = selection_result
+                    result.success = True
+                    result.execution_time = time.time() - phase_start
+                    logger.info(f"阶段1完成(MCP)：选出 {total_count} 只股票")
+                    return result
+
+                task_results = selection_result.get("task_results", []) or []
+                has_mcp_error = any((task.get("error") for task in task_results))
+                has_temporary_unavailable = any(
+                    task.get("error_type") == "mcp_temporary_unavailable"
+                    for task in task_results
+                )
+                force_fallback = has_temporary_unavailable
+                if (enable_fallback or force_fallback) and (total_count == 0 or has_mcp_error):
+                    error_types = ",".join(sorted({
+                        str(task.get("error_type") or "mcp_error")
+                        for task in task_results
+                        if task.get("error")
+                    }))
+                    logger.warning(
+                        f"MCP返回 {total_count} 条"
+                        f"{f'，错误类型={error_types}' if error_types else ''}，降级到本地数据选股"
+                    )
+                else:
+                    result.data = selection_result
+                    result.success = True
+                    result.execution_time = time.time() - phase_start
+                    return result
+            except McpTemporaryUnavailable as e:
+                force_fallback = True
+                logger.warning(f"MCP临时不可用，强制降级到本地数据: {e}")
+            except Exception as e:
+                if enable_fallback:
+                    logger.warning(f"MCP选股异常，降级到本地数据: {e}")
+                else:
+                    result.success = False
+                    result.error = str(e)
+                    result.execution_time = time.time() - phase_start
+                    logger.error(f"MCP选股失败: {e}", exc_info=True)
+                    return result
+
+        # ─── 降级：本地 .day 文件选股（仅当启用降级时）───
+        if not (enable_fallback or force_fallback):
+            result = PhaseResult(phase_name="选股", source="tdx_mcp")
+            result.success = False
+            result.error = "MCP函数未配置且降级未启用"
             result.execution_time = time.time() - phase_start
+            logger.error("MCP函数未配置且降级未启用，选股失败")
             return result
 
+        logger.info("========== 阶段1：本地日线选股(降级模式) ==========")
+        result = PhaseResult(phase_name="选股", source="tdx_local")
         try:
-            logger.info("========== 阶段1：通达信 MCP 选股 ==========")
-            for i, task in enumerate(tasks):
-                self.tdx_selector.add_task(task)
-
-            selection_result = self.tdx_selector.select(tdx_mcp_func=tdx_mcp_func)
-
+            from backend.services.tdx_local_selector import TdxLocalSelectorService
+            local_selector = TdxLocalSelectorService()
+            use_date = trade_date or self._get_trade_date()
+            selection_result = local_selector.select(
+                trade_date=use_date,
+                max_circ_mv=2000,
+                max_close_price=500,
+                min_limit_up_count=3,
+                period_days=100,
+                data_collector=self.collector,
+            )
             result.data = selection_result
             result.success = True
             result.execution_time = time.time() - phase_start
 
-            logger.info(f"阶段1完成：选出 {len(selection_result.get('stocks', []))} 只股票")
+            total = selection_result.get("total_count", 0)
+            logger.info(f"阶段1完成(本地)：选出 {total} 只股票")
         except Exception as e:
             result.success = False
             result.error = str(e)
             result.execution_time = time.time() - phase_start
-            logger.error(f"阶段1失败: {e}", exc_info=True)
+            logger.error(f"本地选股也失败: {e}", exc_info=True)
 
         return result
 
@@ -330,6 +412,74 @@ class StockSelectorService:
 
         return result
 
+    def _enrich_with_limit_list_ths(self, final_stocks: List[Dict[str, Any]], trade_date: str):
+        """获取同花顺涨停榜单数据 + 上一日换手率，丰富到每只股票的数据中"""
+        if not final_stocks:
+            return
+
+        ts_codes = [s["ts_code"] for s in final_stocks]
+        logger.info(f"开始丰富涨停榜单数据：{len(ts_codes)} 只股票")
+
+        # 获取前一交易日（用于判断涨停是否近期）
+        prev_date = None
+        calendar_set = None
+        try:
+            from backend.utils.trading_date import get_previous_trading_day
+            calendar_set = self.collector.get_trading_calendar()
+            if calendar_set:
+                prev_date = get_previous_trading_day(trade_date, calendar_set)
+        except Exception as e:
+            logger.warning(f"获取前一交易日失败: {e}")
+
+        # 1. 获取上一日换手率
+        try:
+            if calendar_set and prev_date:
+                prev_basic = self.collector.get_daily_basic(trade_date=prev_date)
+                if prev_basic is not None and not prev_basic.empty:
+                    prev_basic_filtered = prev_basic[prev_basic['ts_code'].isin(ts_codes)]
+                    prev_turnover_map = {}
+                    for row in prev_basic_filtered.itertuples():
+                        prev_turnover_map[row.ts_code] = row.turnover_rate
+
+                    for stock in final_stocks:
+                        ts_code = stock["ts_code"]
+                        if ts_code in prev_turnover_map:
+                            stock["prev_turnover_rate"] = prev_turnover_map[ts_code]
+
+                    logger.info(f"上一日换手率获取成功：{len(prev_turnover_map)} 只")
+        except Exception as e:
+            logger.warning(f"获取上一日换手率失败: {e}")
+
+        # 2. 逐只获取同花顺涨停榜单数据
+        success_count = 0
+        for stock in final_stocks:
+            ts_code = stock["ts_code"]
+            try:
+                df = self.collector.get_limit_list_ths(ts_code=ts_code, limit_type='涨停池')
+                if df is not None and not df.empty:
+                    latest = df.iloc[0]
+                    stock["lu_desc"] = latest.get("lu_desc")
+                    stock["lu_tag"] = latest.get("tag")
+                    stock["lu_status"] = latest.get("status")
+                    open_num = latest.get("open_num")
+                    stock["lu_open_num"] = int(open_num) if (open_num is not None and not (isinstance(open_num, float) and open_num != open_num)) else None
+                    suc_rate = latest.get("limit_up_suc_rate")
+                    stock["limit_up_suc_rate"] = float(suc_rate) if (suc_rate is not None and not (isinstance(suc_rate, float) and suc_rate != suc_rate)) else None
+                    lu_date = latest.get("trade_date")
+                    stock["latest_lu_date"] = str(lu_date) if lu_date else None
+                    # 判断涨停是否在近两日（选股日或上一交易日）
+                    stock["is_recent_limit_up"] = (
+                        (lu_date and trade_date and lu_date == trade_date) or
+                        (lu_date and prev_date and lu_date == prev_date)
+                    )
+                    success_count += 1
+                else:
+                    logger.warning(f"  无涨停数据: {ts_code}")
+            except Exception as e:
+                logger.warning(f"  获取涨停数据失败 {ts_code}: {e}")
+
+        logger.info(f"涨停榜单数据丰富完成：成功 {success_count}/{len(final_stocks)}")
+
     def _merge_results(
         self,
         phase1_data: Dict[str, Any],
@@ -338,7 +488,7 @@ class StockSelectorService:
         min_open_change_pct: Optional[float],
         min_seal_rate: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """合并三阶段结果"""
+        """合并三阶段结果并计算规则评分"""
         phase1_stocks = phase1_data.get("stocks", [])
         if not phase1_stocks:
             return []
@@ -354,7 +504,10 @@ class StockSelectorService:
                 "ts_code": ts_code,
                 "name": stock.name,
                 "close_price": stock.close,
+                "close": stock.close,
                 "change_pct": stock.change_pct,
+                "pre_change_pct": stock.pre_change_pct,
+                "open_change_pct": stock.open_change_pct,
                 "auction_ratio": stock.auction_ratio,
                 "auction_turnover_rate": stock.auction_turnover_rate,
                 "limit_up_count": stock.limit_up_count,
@@ -363,33 +516,14 @@ class StockSelectorService:
                 "concept": stock.concept,
             }
 
-            # 添加阶段2数据（当阶段2有数据时补充/覆盖）
+            # 添加阶段2数据
             if ts_code in analysis:
-                phase2_pre_change = analysis[ts_code].get("pre_change_pct")
-                if phase2_pre_change is not None:
-                    stock_data["pre_change_pct"] = phase2_pre_change
-                else:
-                    stock_data.setdefault("pre_change_pct", stock.pre_change_pct)
+                p2 = analysis[ts_code]
+                for key in ("pre_change_pct", "open_change_pct", "industry", "concept"):
+                    if p2.get(key) is not None:
+                        stock_data[key] = p2[key]
 
-                phase2_open_change = analysis[ts_code].get("open_change_pct")
-                if phase2_open_change is not None:
-                    stock_data["open_change_pct"] = phase2_open_change
-                else:
-                    stock_data.setdefault("open_change_pct", stock.open_change_pct)
-
-                stock_data["circ_mv"] = analysis[ts_code].get("circ_mv", 0) / 10000 if analysis[ts_code].get("circ_mv") else None
-
-                phase2_industry = analysis[ts_code].get("industry")
-                if phase2_industry is not None:
-                    stock_data["industry"] = phase2_industry
-                else:
-                    stock_data.setdefault("industry", stock.industry)
-
-                phase2_concept = analysis[ts_code].get("concept")
-                if phase2_concept is not None:
-                    stock_data["concept"] = phase2_concept
-                else:
-                    stock_data.setdefault("concept", stock.concept)
+                stock_data["circ_mv"] = p2.get("circ_mv", 0) / 10000 if p2.get("circ_mv") else stock_data.get("circ_mv")
 
             # 添加阶段3数据
             if ts_code in seal_rates:
@@ -409,7 +543,54 @@ class StockSelectorService:
                 if open_change_pct is not None and open_change_pct < min_open_change_pct:
                     continue
 
+            # ========== 规则评分 ==========
+            score_result = RuleScoreService.calculate(
+                limit_up_count=stock_data.get("limit_up_count"),
+                touch_days=stock_data.get("touch_days"),
+                limit_up_days=stock_data.get("limit_up_days"),
+                seal_rate=stock_data.get("seal_rate"),
+                rise_10d_pct=stock_data.get("rise_10d_pct"),
+                pre_change_pct=stock_data.get("pre_change_pct"),
+                open_change_pct=stock_data.get("open_change_pct"),
+                auction_ratio=stock_data.get("auction_ratio"),
+                auction_turnover_rate=stock_data.get("auction_turnover_rate"),
+                circ_mv=stock_data.get("circ_mv"),
+            )
+            stock_data["rule_score"] = score_result["rule_score"]
+            stock_data["score_level"] = score_result["score_level"]
+            stock_data["score_breakdown"] = score_result["score_breakdown"]
+            stock_data["reasons"] = score_result["reasons"]
+            stock_data["risk_tags"] = score_result["risk_tags"]
+
+            # 次日预案
+            plan = NextDayPlanService.generate(
+                open_change_pct=stock_data.get("open_change_pct"),
+                auction_ratio=stock_data.get("auction_ratio"),
+                auction_turnover_rate=stock_data.get("auction_turnover_rate"),
+                pre_change_pct=stock_data.get("pre_change_pct"),
+                seal_rate=stock_data.get("seal_rate"),
+                limit_up_count=stock_data.get("limit_up_count"),
+            )
+            stock_data["next_day_plan"] = plan
+
             merged.append(stock_data)
+
+        # 按规则评分降序排序
+        merged.sort(key=lambda x: x.get("rule_score", 0) or 0, reverse=True)
+
+        # LightGBM模型预测（批量添加model_score）
+        try:
+            merged = batch_predict_before_selection(merged)
+            for s in merged:
+                model_score = s.get("model_score")
+                if model_score is not None:
+                    s["final_score"] = round(s.get("rule_score", 0) * 0.6 + model_score * 0.4, 2)
+                else:
+                    s["final_score"] = round(s.get("rule_score", 0), 2)
+        except Exception as e:
+            logger.warning(f"LightGBM预测失败: {e}")
+            for s in merged:
+                s["final_score"] = round(s.get("rule_score", 0), 2)
 
         return merged
 
@@ -481,11 +662,13 @@ class StockSelectorService:
             db.flush()
 
             for stock in result.get("stocks", []):
+                import json as _json
                 selected_stock = SelectedStock(
                     record_id=record.id,
                     ts_code=stock["ts_code"],
                     name=stock.get("name"),
                     close_price=stock.get("close_price"),
+                    close=stock.get("close"),
                     change_pct=stock.get("change_pct"),
                     pre_change_pct=stock.get("pre_change_pct"),
                     open_change_pct=stock.get("open_change_pct"),
@@ -500,6 +683,24 @@ class StockSelectorService:
                     seal_rate=stock.get("seal_rate"),
                     rise_10d_pct=stock.get("rise_10d_pct"),
                     circ_mv=stock.get("circ_mv"),
+                    # 同花顺涨停榜单数据
+                    lu_desc=stock.get("lu_desc"),
+                    lu_tag=stock.get("lu_tag"),
+                    lu_status=stock.get("lu_status"),
+                    lu_open_num=stock.get("lu_open_num"),
+                    limit_up_suc_rate=stock.get("limit_up_suc_rate"),
+                    latest_lu_date=stock.get("latest_lu_date"),
+                    # 上一日换手率
+                    prev_turnover_rate=stock.get("prev_turnover_rate"),
+                    # 评分字段
+                    rule_score=stock.get("rule_score"),
+                    model_score=stock.get("model_score"),
+                    final_score=stock.get("final_score"),
+                    score_level=stock.get("score_level"),
+                    score_breakdown=_json.dumps(stock.get("score_breakdown", {}), ensure_ascii=False) if stock.get("score_breakdown") else None,
+                    reasons="; ".join(stock.get("reasons", [])) if stock.get("reasons") else None,
+                    risk_tags=_json.dumps(stock.get("risk_tags", []), ensure_ascii=False) if stock.get("risk_tags") else None,
+                    next_day_plan=_json.dumps(stock.get("next_day_plan", {}), ensure_ascii=False) if stock.get("next_day_plan") else None,
                 )
                 db.add(selected_stock)
 
@@ -510,6 +711,53 @@ class StockSelectorService:
             db.rollback()
             logger.error(f"保存选股结果失败: {e}")
             raise
+        finally:
+            db.close()
+
+    def save_feature_snapshot(self, result: Dict[str, Any], trade_date: str) -> int:
+        """保存候选股特征快照（upsert模式）"""
+        db = SessionLocal()
+        saved = 0
+        try:
+            for stock in result.get("stocks", []):
+                ts_code = stock["ts_code"]
+                existing = db.query(StockFeatureSnapshot).filter(
+                    StockFeatureSnapshot.trade_date == trade_date,
+                    StockFeatureSnapshot.ts_code == ts_code,
+                ).first()
+                if existing:
+                    existing.name = stock.get("name")
+                    existing.limit_up_count_100d = stock.get("limit_up_count")
+                    existing.seal_rate_100d = stock.get("seal_rate")
+                    existing.rise_10d_pct = stock.get("rise_10d_pct")
+                    existing.pre_change_pct = stock.get("pre_change_pct")
+                    existing.open_change_pct = stock.get("open_change_pct")
+                    existing.auction_turnover_rate = stock.get("auction_turnover_rate")
+                    existing.auction_ratio = stock.get("auction_ratio")
+                    existing.circ_mv = stock.get("circ_mv")
+                else:
+                    snapshot = StockFeatureSnapshot(
+                        trade_date=trade_date,
+                        ts_code=ts_code,
+                        name=stock.get("name"),
+                        limit_up_count_100d=stock.get("limit_up_count"),
+                        seal_rate_100d=stock.get("seal_rate"),
+                        rise_10d_pct=stock.get("rise_10d_pct"),
+                        pre_change_pct=stock.get("pre_change_pct"),
+                        open_change_pct=stock.get("open_change_pct"),
+                        auction_turnover_rate=stock.get("auction_turnover_rate"),
+                        auction_ratio=stock.get("auction_ratio"),
+                        circ_mv=stock.get("circ_mv"),
+                    )
+                    db.add(snapshot)
+                saved += 1
+            db.commit()
+            logger.info(f"特征快照已保存: {saved} 只股票, 交易日={trade_date}")
+            return saved
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"保存特征快照失败: {e}")
+            return 0
         finally:
             db.close()
 
@@ -615,8 +863,180 @@ def select_stocks(
 
     if save_result:
         result["record_id"] = selector.save_selection_result(result)
+        selector.save_feature_snapshot(result, result.get("trade_date", ""))
+        # 评分V2并行计算
+        if is_score_v2_enabled() and result.get("record_id"):
+            try:
+                v2_service = StockScoringV2Service()
+                v2_service.score_batch(
+                    result.get("stocks", []),
+                    result["record_id"],
+                    result.get("trade_date", ""),
+                )
+            except Exception as e:
+                logger.warning(f"评分V2计算失败（不影响主流程）: {e}")
+
+        # 龙头战法评分并行计算
+        if result.get("record_id") and result.get("stocks"):
+            try:
+                _trigger_dragon_leader_scoring(result["stocks"], result.get("trade_date", ""))
+            except Exception as e:
+                logger.warning(f"龙头战法评分失败（不影响主流程）: {e}")
 
     completeness = validate_data_completeness(result)
     result["completeness"] = completeness
 
+    # AI后台预热：选股完成后自动生成综合概览+异动解读
+    if save_result and result.get("stocks"):
+        try:
+            _trigger_ai_preheat(result["stocks"], result.get("trade_date", ""), result.get("record_id"))
+        except Exception as e:
+            logger.warning(f"AI预热触发失败（不影响主流程）: {e}")
+
+    # 龙虎榜后台预热：选股完成后批量拉取龙虎榜数据
+    if save_result and result.get("stocks"):
+        try:
+            _trigger_lhb_preheat(result["stocks"])
+        except Exception as e:
+            logger.warning(f"龙虎榜预热触发失败（不影响主流程）: {e}")
+
+    # 东财板块关系后台预热：只补齐入选股票，不阻塞选股接口返回
+    if save_result and result.get("stocks"):
+        try:
+            _trigger_dc_board_preheat(result["stocks"], result.get("trade_date", ""))
+        except Exception as e:
+            logger.warning(f"东财板块关系预热触发失败（不影响主流程）: {e}")
+
+    # 风险拆解后台预热：选股完成后批量计算
+    if save_result and result.get("stocks"):
+        try:
+            _trigger_risk_preheat(result["stocks"], result.get("trade_date", ""))
+        except Exception as e:
+            logger.warning(f"风险拆解预热触发失败（不影响主流程）: {e}")
+
     return result
+
+
+def _trigger_dc_board_preheat(stocks: List[Dict], trade_date: str):
+    """后台线程批量刷新入选股票的东财板块关系"""
+    from concurrent.futures import ThreadPoolExecutor
+    from backend.services.dc_board_service import refresh_stock_dc_boards
+
+    if not trade_date:
+        logger.warning("[预热] 东财板块关系缺少交易日，跳过")
+        return
+
+    def _warm_all():
+        try:
+            stats = refresh_stock_dc_boards(stocks, trade_date)
+            logger.info(
+                f"[预热] 东财板块关系刷新完成：股票{stats.get('stocks', 0)}只，"
+                f"板块关系{stats.get('boards', 0)}条，失败{stats.get('failed', 0)}只"
+            )
+        except Exception as e:
+            logger.warning(f"[预热] 东财板块关系批量刷新失败: {e}")
+
+    logger.info(f"[预热] 后台启动 {len(stocks)} 只股票的东财板块关系刷新")
+    pool = ThreadPoolExecutor(max_workers=1)
+    pool.submit(_warm_all)
+    pool.shutdown(wait=False)
+
+
+def _trigger_risk_preheat(stocks: List[Dict], trade_date: str):
+    """后台线程批量预热风险拆解数据"""
+    from concurrent.futures import ThreadPoolExecutor
+    from backend.services.risk_breakdown_service import calculate_risk
+
+    def _warm_one(stock: Dict):
+        ts_code = stock.get("ts_code", "")
+        stock_name = stock.get("name", "")
+        if not ts_code:
+            return
+        try:
+            result = calculate_risk(ts_code, trade_date, force_refresh=False)
+            if result.get("data_status") == "available":
+                logger.info(f"[预热] 风险拆解完成: {ts_code} {stock_name}")
+        except Exception as e:
+            logger.warning(f"[预热] 风险拆解 {ts_code} 失败: {e}")
+
+    logger.info(f"[预热] 后台启动 {len(stocks)} 只股票的风险拆解")
+    pool = ThreadPoolExecutor(max_workers=5)
+    for stock in stocks:
+        pool.submit(_warm_one, stock)
+    pool.shutdown(wait=False)
+
+
+def _trigger_dragon_leader_scoring(stocks: List[Dict], trade_date: str):
+    """后台线程批量计算龙头战法评分"""
+    from concurrent.futures import ThreadPoolExecutor
+    from backend.services.dragon_leader import calculate_dragon_leader_score
+
+    def _score_one(stock: Dict):
+        ts_code = stock.get("ts_code", "")
+        stock_name = stock.get("name", "")
+        if not ts_code or not stock_name:
+            return
+        try:
+            calculate_dragon_leader_score(ts_code, trade_date, stock_name, force_refresh=True)
+        except Exception as e:
+            logger.warning(f"[龙头战法评分] {ts_code} 失败: {e}")
+
+    logger.info(f"[龙头战法评分] 后台启动 {len(stocks)} 只股票的评分计算")
+    pool = ThreadPoolExecutor(max_workers=3)
+    for stock in stocks:
+        pool.submit(_score_one, stock)
+    pool.shutdown(wait=False)
+
+
+def _trigger_lhb_preheat(stocks: List[Dict]):
+    """后台线程批量预热龙虎榜数据"""
+    from concurrent.futures import ThreadPoolExecutor
+    from backend.services.lhb_service import analyze_lhb
+
+    def _warm_one(stock: Dict):
+        ts_code = stock.get("ts_code", "")
+        stock_name = stock.get("name", "")
+        if not ts_code or not stock_name:
+            return
+        try:
+            result = analyze_lhb(ts_code, force_refresh=False)
+            if result.get("data_status") == "available":
+                logger.info(f"[预热] 龙虎榜数据完成: {ts_code} {stock_name}")
+            elif result.get("data_status") == "not_on_list":
+                logger.info(f"[预热] 龙虎榜未上榜: {ts_code} {stock_name}")
+            else:
+                logger.warning(f"[预热] 龙虎榜 {ts_code} 返回异常: {result.get('data_status')}")
+        except Exception as e:
+            logger.warning(f"[预热] 龙虎榜 {ts_code} 失败: {e}")
+
+    logger.info(f"[预热] 后台启动 {len(stocks)} 只股票的龙虎榜数据")
+    pool = ThreadPoolExecutor(max_workers=5)
+    for stock in stocks:
+        pool.submit(_warm_one, stock)
+    pool.shutdown(wait=False)
+
+
+def _trigger_ai_preheat(stocks: List[Dict], trade_date: str, record_id: Optional[int]):
+    """后台线程批量预热AI数据（概览+异动）"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _warm_one(stock: Dict):
+        ts_code = stock.get("ts_code", "")
+        stock_name = stock.get("name", "")
+        if not ts_code or not stock_name:
+            return
+        try:
+            from backend.services.ai_brief.overview_brief_service import OverviewBriefService
+            from backend.services.anomaly_interpretation.interpreter_service import get_anomaly_interpretation
+            pool = ThreadPoolExecutor(max_workers=2)
+            pool.submit(OverviewBriefService.get_or_build, ts_code, stock_name, trade_date, record_id)
+            pool.submit(get_anomaly_interpretation, ts_code, stock_name, trade_date, False)
+            pool.shutdown(wait=False)
+        except Exception as e:
+            logger.warning(f"[AI预热] {ts_code} 失败: {e}")
+
+    logger.info(f"[AI预热] 后台启动 {len(stocks)} 只股票的AI生成")
+    pool = ThreadPoolExecutor(max_workers=5)
+    for stock in stocks:
+        pool.submit(_warm_one, stock)
+    pool.shutdown(wait=False)

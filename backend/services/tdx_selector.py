@@ -17,6 +17,12 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+try:
+    from backend.services.tdx_mcp_client import McpTemporaryUnavailable
+except Exception:
+    class McpTemporaryUnavailable(RuntimeError):
+        pass
+
 
 @dataclass
 class TdxStockResult:
@@ -175,12 +181,18 @@ class CallAuctionCondition(SelectionCondition):
                 f"竞价量占昨日成交量比例{int(self.call_auction_ratio_min * 100)}%到{int(self.call_auction_ratio_max * 100)}%"
             )
         if self.turnover_rate_min > 0 and self.turnover_rate_max > 0:
-            # 修复：确保竞价换手率也使用整数格式
-            # 处理 0.5% -> "0.5%" 而不是 "0.5000000000000001%"
-            min_val = round(self.turnover_rate_min * 100, 2)
-            max_val = round(self.turnover_rate_max * 100, 2)
-            min_str = f"{int(min_val)}%" if min_val.is_integer() else f"{min_val}%"
-            max_str = f"{int(max_val)}%" if max_val.is_integer() else f"{max_val}%"
+            # 竞价换手率：支持一位小数
+            min_val = self.turnover_rate_min * 100
+            max_val = self.turnover_rate_max * 100
+            # 如果是整数就用整数格式，否则用一位小数
+            if min_val.is_integer():
+                min_str = f"{int(min_val)}%"
+            else:
+                min_str = f"{min_val}%"
+            if max_val.is_integer():
+                max_str = f"{int(max_val)}%"
+            else:
+                max_str = f"{max_val}%"
             parts.append(
                 f"竞价换手率{min_str}到{max_str}"
             )
@@ -634,42 +646,7 @@ class TdxSelectorService:
                 size=str(task.page_size),
             )
             raw_stocks = parse_tdx_response(raw_data)
-            
-            # 二次筛选，确保符合所有条件
-            stocks = []
-            for stock in raw_stocks:
-                valid = True
-                
-                # 检查所有条件
-                for cond in task.conditions:
-                    # 检查涨停次数
-                    if isinstance(cond, LimitUpCondition):
-                        if cond.min_limit_up_count > 0:
-                            if (stock.limit_up_count is None or 
-                                stock.limit_up_count < cond.min_limit_up_count):
-                                valid = False
-                                break
-                    # 检查竞价条件
-                    elif isinstance(cond, CallAuctionCondition):
-                        if (stock.auction_ratio is None or 
-                            stock.auction_ratio < cond.call_auction_ratio_min * 100 or 
-                            stock.auction_ratio > cond.call_auction_ratio_max * 100):
-                            valid = False
-                            break
-                        if (stock.auction_turnover_rate is None or 
-                            stock.auction_turnover_rate < cond.turnover_rate_min * 100 or 
-                            stock.auction_turnover_rate > cond.turnover_rate_max * 100):
-                            valid = False
-                            break
-                
-                if valid:
-                    stocks.append(stock)
-            
-            # 记录筛选前后的数量
-            if len(raw_stocks) != len(stocks):
-                logger.info(
-                    f"二次筛选: {len(raw_stocks)} -> {len(stocks)} 只股票"
-                )
+            stocks = raw_stocks
             
             task_time = time.time() - task_start
 
@@ -719,6 +696,18 @@ class TdxSelectorService:
                 "total_count": 0,
                 "execution_time": time.time() - task_start,
                 "error": f"数据格式异常: {e}",
+            }
+        except McpTemporaryUnavailable as e:
+            logger.warning(f"任务 [{task.task_id}] MCP临时不可用: {e}")
+            return {
+                "task_id": task.task_id,
+                "task_name": task.task_name,
+                "query": query,
+                "stocks": [],
+                "total_count": 0,
+                "execution_time": time.time() - task_start,
+                "error": str(e),
+                "error_type": "mcp_temporary_unavailable",
             }
         except Exception as e:
             logger.error(f"任务 [{task.task_id}] 未知错误: {e}", exc_info=True)

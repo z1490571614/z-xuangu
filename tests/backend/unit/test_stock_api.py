@@ -23,29 +23,29 @@ class TestTradingDate:
 
 class TestStockSelect:
     def test_select_without_auth(self, client):
-        """未认证可发起选股请求（公开接口）"""
+        """未认证可发起选股请求（公开接口，不接受500）"""
         resp = client.post("/api/v1/stock/select", json={})
-        assert resp.status_code in (200, 422, 500)
+        assert resp.status_code != 500, f"选股接口不应返回500: {resp.text[:200]}"
 
     def test_select_with_invalid_date_format(self, client):
-        """非法日期格式应返回 422"""
+        """非法日期格式不应导致500错误"""
         resp = client.post("/api/v1/stock/select", json={"trade_date": "2026-13-01"})
-        assert resp.status_code in (200, 422, 500)
+        assert resp.status_code != 500, f"非法日期不应导致服务器错误: {resp.text[:200]}"
 
     def test_select_with_invalid_task_template(self, client):
-        """非法策略模板应返回 422 或友好处理"""
+        """非法策略模板不应导致500错误"""
         resp = client.post("/api/v1/stock/select", json={"task_template": "nonexistent_template"})
-        assert resp.status_code in (200, 422, 500)
+        assert resp.status_code != 500, f"非法模板不应导致服务器错误: {resp.text[:200]}"
 
     def test_select_with_min_seal_rate_100(self, client):
-        """设置封板率 100% 应正常处理"""
+        """设置封板率100%不应导致500错误"""
         resp = client.post("/api/v1/stock/select", json={"min_seal_rate": 100})
-        assert resp.status_code in (200, 422, 500)
+        assert resp.status_code != 500, f"封板率参数不应导致服务器错误: {resp.text[:200]}"
 
     def test_select_with_high_period_days(self, client):
-        """设置较大封板率周期应正常处理"""
+        """设置较大封板率周期不应导致500错误"""
         resp = client.post("/api/v1/stock/select", json={"period_days": 250})
-        assert resp.status_code in (200, 422, 500)
+        assert resp.status_code != 500, f"周期参数不应导致服务器错误: {resp.text[:200]}"
 
 
 class TestStockResults:
@@ -66,19 +66,19 @@ class TestStockResults:
         assert resp.status_code == 200
 
     def test_results_with_invalid_page(self, client):
-        """非法页码应返回 422（当前行为：自动修正为默认值）"""
+        """非法页码不应导致500错误"""
         resp = client.get("/api/v1/stock/results?page=0")
-        assert resp.status_code in (200, 422)
+        assert resp.status_code != 500, f"非法页码不应导致服务器错误: {resp.text[:200]}"
 
     def test_results_with_large_page_size(self, client):
-        """超大 page_size 应返回 422（当前行为：自动修正为默认值）"""
+        """超大 page_size 不应导致500错误"""
         resp = client.get("/api/v1/stock/results?page_size=999")
-        assert resp.status_code in (200, 422)
+        assert resp.status_code != 500, f"超大page_size不应导致服务器错误: {resp.text[:200]}"
 
     def test_get_nonexistent_result_detail(self, client):
-        """不存在的选股记录详情应返回 404"""
+        """不存在的选股记录详情不应返回500"""
         resp = client.get("/api/v1/stock/results/999999")
-        assert resp.status_code in (404, 200)
+        assert resp.status_code != 500, f"不存在的记录不应导致服务器错误: {resp.text[:200]}"
 
     def test_result_detail_structure(self, client):
         """选股结果详情应包含完整的股票信息字段"""

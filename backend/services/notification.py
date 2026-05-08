@@ -62,23 +62,29 @@ class FeishuNotifier:
         for i, stock in enumerate(stocks[:10], 1):
             ts_code = stock.get('ts_code', '')
             name = stock.get('name', '未知')
-            close = stock.get('close', 0)
+            close = stock.get('close', 0) or stock.get('close_price', 0)
             change_pct = stock.get('change_pct', 0)
             circ_mv = stock.get('circ_mv', 0)
+            rule_score = stock.get('rule_score')
+            score_level = stock.get('score_level', '')
+            reasons = stock.get('reasons', [])
+            risk_tags = stock.get('risk_tags', [])
 
             change_emoji = "📈" if change_pct and change_pct > 0 else "📉"
-            change_color = "green" if change_pct and change_pct > 0 else "red"
 
-            content_lines.append(
-                f"**{i}. {name}** ({ts_code})"
-            )
-            content_lines.append(
-                f"   💰 价格: {close:.2f}元 | {change_emoji} 涨跌: {change_pct:.2f}%"
-            )
+            line = f"**{i}. {name}** ({ts_code})\n"
+            line += f"   💰 {close:.2f}元 | {change_emoji} {change_pct:.2f}%"
+            if rule_score is not None:
+                line += f" | ⭐ 评分: {rule_score:.1f} **{score_level}**"
             if circ_mv:
-                content_lines.append(
-                    f"   📊 流通市值: {circ_mv:.2f}亿"
-                )
+                line += f"\n   📊 流通市值: {circ_mv:.2f}亿"
+            if reasons:
+                top_reasons = reasons[:3]
+                line += f"\n   📌 {'; '.join(top_reasons)}"
+            if risk_tags:
+                line += f"\n   ⚠️ 风险: {', '.join(risk_tags[:3])}"
+
+            content_lines.append(line)
             content_lines.append("")
 
         if passed_count > 10:

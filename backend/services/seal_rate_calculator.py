@@ -9,6 +9,7 @@
 import logging
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -18,6 +19,8 @@ from backend.models.seal_rate import StockDailyData, SealRateCache
 from backend.services.data_collector import TushareDataCollector
 
 logger = logging.getLogger(__name__)
+
+_PARALLEL_WORKERS = 5
 
 
 class SealRateCalculator:
@@ -443,7 +446,7 @@ class SealRateCalculator:
         min_seal_rate: Optional[float] = None
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        批量计算封板率
+        批量计算封板率（优先查缓存，未缓存的使用线程池并行计算）
 
         Args:
             ts_codes: 股票代码列表
@@ -456,35 +459,68 @@ class SealRateCalculator:
         """
         all_results = []
         passed_results = []
+        uncached_codes = []
 
-        for i, ts_code in enumerate(ts_codes):
-            try:
-                logger.info(f"正在计算第 {i+1}/{len(ts_codes)} 只: {ts_code}")
-                result = self.calculate_seal_rate(ts_code, trade_date, period_days)
-                all_results.append(result)
-
-                if min_seal_rate is not None:
-                    seal_rate = result.get('seal_rate')
-                    if seal_rate is not None and seal_rate >= min_seal_rate - 0.01:
-                        passed_results.append(result)
-                else:
-                    passed_results.append(result)
-
-            except Exception as e:
-                logger.error(f"计算 {ts_code} 封板率异常: {e}", exc_info=True)
-                all_results.append({
+        # 第一轮：检查缓存（顺序执行，快速）
+        for ts_code in ts_codes:
+            cached = self.get_cached_result(ts_code, trade_date, period_days)
+            if cached:
+                result = {
                     'ts_code': ts_code,
                     'trade_date': trade_date,
                     'period_days': period_days,
-                    'touch_days': 0,
-                    'limit_up_days': 0,
-                    'seal_rate': None,
-                    'data_complete': 0,
-                    'error': str(e),
-                })
+                    'touch_days': cached.touch_days,
+                    'limit_up_days': cached.limit_up_days,
+                    'seal_rate': cached.seal_rate,
+                    'start_date': cached.start_date,
+                    'end_date': cached.end_date,
+                    'data_complete': cached.data_complete,
+                    'from_cache': True,
+                }
+                all_results.append(result)
+                if min_seal_rate is None or (result['seal_rate'] is not None and result['seal_rate'] >= min_seal_rate - 0.01):
+                    passed_results.append(result)
+            else:
+                uncached_codes.append(ts_code)
+
+        if not uncached_codes:
+            return passed_results, all_results
+
+        # 第二轮：未缓存的股票并行计算
+        def _calc_one(code: str) -> Dict[str, Any]:
+            calc = SealRateCalculator()
+            try:
+                return calc.calculate_seal_rate(code, trade_date, period_days)
+            finally:
+                calc.close()
+
+        with ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as executor:
+            futures = {executor.submit(_calc_one, code): code for code in uncached_codes}
+            for future in as_completed(futures):
+                code = futures[future]
+                try:
+                    result = future.result()
+                    result['from_cache'] = False
+                    all_results.append(result)
+                    if min_seal_rate is None or (result['seal_rate'] is not None and result['seal_rate'] >= min_seal_rate - 0.01):
+                        passed_results.append(result)
+                except Exception as e:
+                    logger.error(f"计算 {code} 封板率异常: {e}", exc_info=True)
+                    error_result = {
+                        'ts_code': code,
+                        'trade_date': trade_date,
+                        'period_days': period_days,
+                        'touch_days': 0,
+                        'limit_up_days': 0,
+                        'seal_rate': None,
+                        'data_complete': 0,
+                        'error': str(e),
+                        'from_cache': False,
+                    }
+                    all_results.append(error_result)
 
         logger.info(
-            f"批量计算完成: 共{len(ts_codes)}只, "
+            f"批量计算完成: 共{len(ts_codes)}只(缓存{len(ts_codes)-len(uncached_codes)}+计算{len(uncached_codes)}), "
             f"通过{len(passed_results)}只"
         )
 

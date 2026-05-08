@@ -13,6 +13,17 @@ logger = logging.getLogger(__name__)
 
 _SENTIMENT_SCORE_MULTIPLIER = 10
 
+ROUNDUP_TITLE_PATTERNS = (
+    "新闻精选",
+    "晚间新闻精选",
+    "早间新闻精选",
+    "公告精选",
+    "晚间公告",
+    "早间公告",
+    "盘前必读",
+    "投资日历",
+)
+
 DIM_LABELS = {
     "financial_risk": "业绩风险",
     "shareholder_risk": "股东风险",
@@ -51,11 +62,26 @@ def calculate_announcement_alpha(
             "data_status": "missing"
         }
 
-    # 用新引擎逐条分析
+    # 用新引擎逐条分析。合集类新闻不能直接归因为单一股票风险，
+    # 除非标题明确点名该股。
     results = []
     for item in news_items:
+        if _should_skip_roundup_news(item):
+            continue
         result = analyze_news_event(item, debug=False)
         results.append(result)
+
+    if not results:
+        return {
+            "good_news_score": 0,
+            "bad_news_score": 0,
+            "announcement_alpha_score": 0,
+            "announcement_bias": "neutral",
+            "tips": ["未检测到可归因到个股的新闻信号"],
+            "dimension_scores": {"financial_risk": 0, "shareholder_risk": 0, "st_risk": 0, "regulatory": 0},
+            "dimension_tips": {},
+            "data_status": "no_relevant_news"
+        }
 
     # 聚合
     agg = aggregate_news_results(results)
@@ -139,3 +165,12 @@ def _event_to_dim(event_type: str) -> str:
         "litigation": "regulatory",
     }
     return mapping.get(event_type, "")
+
+
+def _should_skip_roundup_news(item: Dict[str, Any]) -> bool:
+    title = str(item.get("title", "") or "")
+    stock_name = str(item.get("stock_name", "") or "")
+    is_roundup = any(pattern in title for pattern in ROUNDUP_TITLE_PATTERNS)
+    if not is_roundup:
+        return False
+    return bool(stock_name and stock_name not in title)

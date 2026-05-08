@@ -69,8 +69,17 @@
     <div v-if="stocks.length > 0" class="section stock-section">
       <div class="section-header">
         <h3>股票明细 <small>(记录 #{{ currentRecordId }})</small></h3>
-        <div class="stock-count-bar">
-          共 <strong>{{ stocks.length }}</strong> 只股票
+        <div class="header-actions">
+          <div class="stock-count-bar">
+            共 <strong>{{ stocks.length }}</strong> 只股票
+          </div>
+          <div v-if="preloading" class="preload-status">
+            <span class="preload-spinner"></span>
+            预加载中 {{ preloadCount }}/{{ stocks.length }}
+          </div>
+          <button v-if="!preloading" class="btn-clear-cache" @click="clearAllCache">
+            清空缓存
+          </button>
         </div>
       </div>
 
@@ -78,7 +87,6 @@
         <table class="data-table stock-table">
           <thead>
             <tr>
-              <th>序号</th>
               <th>代码</th>
               <th>名称</th>
               <th @click="sortBy('close_price')" class="sortable">
@@ -95,24 +103,36 @@
               </th>
               <th>昨涨幅</th>
               <th>开涨幅</th>
+              <th @click="sortBy('health_score')" class="sortable">
+                龙头评级
+                <span v-if="sortField === 'health_score'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('leader_strength_score')" class="sortable">
+                强度
+                <span v-if="sortField === 'leader_strength_score'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th>风险</th>
+              <th>入选原因</th>
               <th>竞昨比</th>
               <th>竞价换手率</th>
-              <th>100天内触板次数</th>
-              <th>100天内封板次数</th>
-              <th>100天内封成比</th>
+              <th>触板</th>
+              <th>封板</th>
+              <th>封成比</th>
               <th>10日涨幅</th>
-              <th>行业概念</th>
-              <th>板块</th>
             </tr>
           </thead>
           <tbody>
-            <tr
+            <template
               v-for="(stock, index) in sortedStocks"
               :key="stock.ts_code"
             >
-              <td class="index-col">{{ index + 1 }}</td>
+            <tr>
               <td><code>{{ stock.ts_code }}</code></td>
-              <td><strong>{{ stock.name }}</strong></td>
+              <td><a class="stock-name-link" href="#" @click.prevent="showDetail(stock)">{{ stock.name }}</a></td>
               <td class="num-cell">{{ formatNum(stock.close_price) }}</td>
               <td :class="['num-cell', getChangeClass(stock.change_pct)]">
                 {{ formatPct(stock.change_pct) }}
@@ -123,27 +143,48 @@
               <td :class="['num-cell', getChangeClass(stock.open_change_pct)]">
                 {{ formatPct(stock.open_change_pct) }}
               </td>
+              <td class="num-cell score-cell">
+                <span v-if="stock.leader_level" :class="'level-tag ' + stock.leader_level">{{ stock.leader_level }}</span>
+                <span v-else class="muted">{{ stock.final_score != null ? stock.final_score.toFixed(1) : '--' }}</span>
+              </td>
+              <td class="num-cell">{{ stock.leader_strength_score ?? '--' }}</td>
+              <td class="num-cell">{{ stock.retreat_risk_score ?? '--' }}</td>
+              <td class="reasons-cell">
+                <span v-if="stock.reasons?.length" class="reasons-text" :title="stock.reasons.join('; ')">{{ stock.reasons[0] }}{{ stock.reasons.length > 1 ? '等' : '' }}</span>
+                <span v-else class="muted">--</span>
+              </td>
               <td class="num-cell">{{ formatPct(stock.auction_ratio) }}</td>
               <td class="num-cell">{{ formatPct(stock.auction_turnover_rate) }}</td>
-              <td class="num-cell">{{ stock.touch_days || '--' }}次</td>
-              <td class="num-cell highlight">{{ stock.limit_up_days || stock.limit_up_count || '--' }}次</td>
+              <td class="num-cell">{{ stock.touch_days || '--' }}</td>
+              <td class="num-cell highlight">{{ stock.limit_up_days || stock.limit_up_count || '--' }}</td>
               <td class="num-cell">{{ formatPct(stock.seal_rate) }}</td>
               <td :class="['num-cell', getChangeClass(stock.rise_10d_pct)]">
                 {{ formatPct(stock.rise_10d_pct) }}
               </td>
-              <td class="tag-cell">
-                <span v-if="stock.industry" class="industry-tag">{{ stock.industry }}</span>
-                <span v-else class="muted">--</span>
-              </td>
-              <td class="tag-cell">
-                <span v-if="stock.board_type" class="sector-tag">{{ stock.board_type }}</span>
-                <span v-else class="muted">--</span>
-              </td>
             </tr>
+            <!-- 涨停/换手率标签行 -->
+              <tr v-if="hasEnrichData(stock)" class="enrich-row">
+                <td colspan="4" class="enrich-cell"><span class="enrich-tag lu-desc">{{ stock.lu_desc || '--' }}</span></td>
+                <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
+                <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
+                <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag open-num">炸板{{ stock.lu_open_num != null ? stock.lu_open_num : 0 }}次</span></td>
+                <td colspan="3" class="enrich-cell"><span class="enrich-tag suc-rate">近一年封板率{{ fmtRate(stock.limit_up_suc_rate) }}</span></td>
+                <td colspan="2" class="enrich-cell"><span class="enrich-tag turnover">昨日换手{{ formatPct(stock.prev_turnover_rate) }}</span></td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
     </div>
+
+    <!-- 个股详情弹窗 -->
+    <StockDetailModal
+      :visible="showDetailModal"
+      :ts-code="detailTsCode"
+      :stock-name="detailStockName"
+      :record-id="currentRecordId"
+      @close="showDetailModal = false"
+    />
 
     <!-- 确认删除弹窗 -->
     <div v-if="showConfirm" class="modal-overlay" @click.self="showConfirm = false">
@@ -167,6 +208,8 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import axios from 'axios'
+import StockDetailModal from './StockDetailModal.vue'
+import { stockPreloadService } from '../services/StockPreloadService'
 
 const records = ref([])
 const stocks = ref([])
@@ -176,8 +219,12 @@ const pageSize = 10
 const totalRecords = ref(0)
 const currentRecordId = ref(null)
 
-const sortField = ref('change_pct')
+const sortField = ref('health_score')
 const sortOrder = ref('desc')
+
+const showDetailModal = ref(false)
+const detailTsCode = ref('')
+const detailStockName = ref('')
 
 const selectedIds = ref([])
 const showConfirm = ref(false)
@@ -185,6 +232,10 @@ const deleting = ref(false)
 const confirmMode = ref('batch')
 const confirmTarget = ref(null)
 const confirmMessage = ref('')
+
+const preloading = ref(false)
+const preloadProgress = ref(0)
+const preloadCount = ref(0)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalRecords.value / pageSize)))
 
@@ -242,10 +293,60 @@ async function loadStocks(recordId) {
   try {
     const res = await axios.get(`/api/v1/stock/results/${recordId}`)
     stocks.value = res.data?.data?.stocks || []
+    
+    if (stocks.value.length > 0) {
+      startPreload(stocks.value)
+    }
   } catch (e) {
     console.error('加载股票失败:', e)
     stocks.value = []
   }
+}
+
+async function startPreload(stocksList) {
+  preloading.value = true
+  preloadProgress.value = 0
+  preloadCount.value = 0
+  
+  try {
+    const preloadStocks = stocksList.map(stock => ({
+      ts_code: stock.ts_code,
+      name: stock.name,
+      record_id: currentRecordId.value
+    }))
+    
+    const results = await stockPreloadService.preloadStocks(preloadStocks)
+    
+    let successCount = 0
+    results.forEach(result => {
+      if (result.status === 'fulfilled') successCount++
+    })
+    
+    preloadCount.value = successCount
+    preloadProgress.value = 100
+    
+    console.log(`预加载完成: ${successCount}/${results.length} 只股票`)
+
+    // 第二步：后台批量预热AI数据（概览+异动解读），不阻塞响应
+    axios.post('/api/v1/stock/detail/preload-ai', preloadStocks, { timeout: 5000 }).catch(() => {})
+  } catch (e) {
+    console.error('预加载失败:', e)
+  } finally {
+    setTimeout(() => {
+      preloading.value = false
+    }, 2000)
+  }
+}
+
+function clearAllCache() {
+  stockPreloadService.clearCache()
+  alert('缓存已清空')
+}
+
+function showDetail(stock) {
+  detailTsCode.value = stock.ts_code
+  detailStockName.value = stock.name
+  showDetailModal.value = true
 }
 
 function toggleSelect(id) {
@@ -336,6 +437,20 @@ function statusText(s) {
 function formatNum(v) { return v != null ? Number(v).toFixed(2) : '--' }
 function formatPct(v) { return v != null ? Number(v).toFixed(2) + '%' : '--' }
 function formatTime(t) { if (!t) return '--'; return t.replace('T', ' ').substring(0, 19) }
+
+function fmtRate(v) {
+  if (v == null) return '--'
+  const pct = v * 100
+  return pct.toFixed(1) + '%'
+}
+
+function hasEnrichData(stock) {
+  return stock.lu_desc || stock.lu_tag || stock.lu_status || stock.lu_open_num != null || stock.limit_up_suc_rate != null || stock.prev_turnover_rate != null
+}
+
+function isLimitUp(stock) {
+  return stock.pre_change_pct != null && stock.pre_change_pct >= 9.8
+}
 </script>
 
 <style scoped>
@@ -354,6 +469,49 @@ function formatTime(t) { if (!t) return '--'; return t.replace('T', ' ').substri
 .section-header h3 { margin: 0; font-size: 16px; color: #333; }
 .section-header h3 small { color: #999; font-weight: normal; font-size: 13px; }
 .stock-count-bar { background: #f6ffed; padding: 8px 14px; border-radius: 4px; color: #52c41a; font-size: 13px; }
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.preload-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: #e6f7ff;
+  border-radius: 4px;
+  color: #1890ff;
+  font-size: 12px;
+}
+
+.preload-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #91d5ff;
+  border-top-color: #1890ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.btn-clear-cache {
+  padding: 6px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  font-size: 12px;
+  color: #999;
+}
+
+.btn-clear-cache:hover {
+  border-color: #ff4d4f;
+  color: #ff4d4f;
+}
 
 .batch-actions {
   display: flex;
@@ -438,6 +596,23 @@ function formatTime(t) { if (!t) return '--'; return t.replace('T', ' ').substri
 .num-cell { font-family: 'SF Mono', -apple-system, sans-serif; font-variant-numeric: tabular-nums; }
 .num-cell.muted { color: #bbb; }
 .num-cell.highlight { color: #ff4d4f; font-weight: 700; }
+.num-cell.score-cell { color: #667eea; font-weight: 700; }
+
+.level-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 700;
+}
+.level-badge.A\+ { background: linear-gradient(135deg, #667eea20, #764ba220); color: #667eea; }
+.level-badge.A { background: #f6ffed; color: #52c41a; }
+.level-badge.B\+ { background: #fff7e6; color: #fa8c16; }
+.level-badge.B { background: #fffbe6; color: #faad14; }
+.level-badge.C { background: #fff2f0; color: #ff4d4f; }
+.level-badge.D { background: #f5f5f5; color: #999; }
+
+.reasons-cell { max-width: 180px; }
+.reasons-text { font-size: 11px; color: #666; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.stock-name-link { color: #667eea; font-weight: 600; text-decoration: none; cursor: pointer; }
+.stock-name-link:hover { text-decoration: underline; color: #764ba2; }
 
 .positive {
   color: #cf1322;
@@ -542,6 +717,50 @@ code {
   white-space: nowrap;
 }
 .muted { color: #ccc; }
+
+/* 涨停/换手率标签行 */
+.enrich-row { background: #fafbfc; }
+.enrich-row:hover { background: #f0f5ff; }
+.enrich-cell {
+  padding: 6px 4px !important;
+  text-align: center !important;
+}
+.enrich-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.enrich-tag.lu-desc {
+  background: #E3F2FD;
+  color: #1565C0;
+}
+.enrich-tag.lu-tag {
+  background: #FFF3E0;
+  color: #E65100;
+}
+.enrich-tag.lu-status {
+  background: #FFF3E0;
+  color: #E65100;
+}
+.enrich-tag.open-num {
+  background: #FFEBEE;
+  color: #C62828;
+}
+.enrich-tag.suc-rate {
+  background: #F5F5F5;
+  color: #333333;
+}
+.enrich-tag.turnover {
+  background: #F5F5F5;
+  color: #333333;
+}
 
 .no-data, .loading {
   text-align: center;

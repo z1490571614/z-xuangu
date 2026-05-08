@@ -100,6 +100,7 @@ def _build_seat_tags_list(detail: List[Dict], service: Optional['LhbService'] = 
             "sell": _pyfloat(s.get("sell", 0)) or 0,
             "net_buy": _pyfloat(s.get("net_buy", 0)) or 0,
             "tag": tag,
+            "detail_type": detail_type,
             "style": style,
             "trader": trader,
         })
@@ -131,8 +132,8 @@ def _generate_tags(buy_details: List[Dict], sell_details: List[Dict],
     """生成游资行为标签"""
     tags = []
 
-    # 检查是否有机构/北向买入（高溢价席位）
-    has_inst_buy = any(d.get("tag") == "高溢价" and d.get("trader") in ("机构", "北向") for d in buy_details)
+    # 检查是否有机构买入（高溢价席位）
+    has_inst_buy = any(d.get("tag") == "高溢价" and d.get("detail_type") == "机构" for d in buy_details)
     if has_inst_buy:
         tags.append("机构净买入")
 
@@ -142,13 +143,16 @@ def _generate_tags(buy_details: List[Dict], sell_details: List[Dict],
         tags.append("一线游资抢筹")
 
     # 检查北向（通过 detail_type 判断）
-    has_north = any(d.get("tag") == "高溢价" and d.get("trader") == "北向" for d in buy_details)
+    has_north = any(d.get("tag") == "高溢价" and d.get("detail_type") == "北向" for d in buy_details)
     if has_north:
         tags.append("北向加仓")
 
     # 检查高溢价游资买入
-    has_premium = any(d.get("tag") == "高溢价" for d in buy_details)
-    if has_premium and not has_inst_buy:
+    has_premium = any(
+        d.get("tag") == "高溢价" and d.get("detail_type") not in ("机构", "北向")
+        for d in buy_details
+    )
+    if has_premium:
         tags.append("顶级游资买入")
 
     # 核按钮

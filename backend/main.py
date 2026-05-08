@@ -10,7 +10,7 @@ os.environ.setdefault('TUSHARE_PRO_SAVE_PATH', tushare_cache_dir)
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.websockets import WebSocket
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -23,9 +23,20 @@ setup_logging(
     log_level=os.getenv("LOG_LEVEL", "INFO"),
 )
 
-from backend.api import stock, task, config, strategy
+from backend.api import stock, task, config, strategy, stock_detail, score_v2, anomaly, overview_brief, news_v2
 from backend.auth import routes as auth_routes
 from backend.database import engine, Base
+from backend.models.stock_lhb import StockLhb
+from backend.models.stock_risk import StockRiskBreakdown  # 确保表在 create_all 前注册
+from backend.models.stock_ths_board import ThsBoardIndex, StockThsBoardMember
+from backend.models.board import BoardIndex, StockBoardMember, BoardDailySnapshot, BoardStrengthSnapshot
+from backend.models import (
+    SelectionRecord, SelectedStock,
+    StockScoreV2, StockScoreBreakdownV2, StockRiskBreakdownV2,
+    StockOverviewBrief, StockAnomalyInterpretation,
+    StockFeatureSnapshot, StockDetailSnapshot,
+)  # 确保 V3 表在 create_all 前注册
+from backend.models.seal_rate import StockDailyData, SealRateCache  # 确保日线/封板率表注册
 from backend.middleware.prometheus_middleware import prometheus_middleware, metrics_endpoint
 from backend.middleware.security_middleware import security_headers_middleware, HTTPSRedirectMiddleware
 
@@ -40,6 +51,32 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     logger.info("数据库表创建完成")
 
+    # 启动时同步一次东财板块词典，运行期主题匹配只读本地库
+    try:
+        from backend.services.dc_board_service import DcBoardService
+        from backend.utils.trading_date import get_latest_trading_day
+        trade_date = get_latest_trading_day()
+        stats = DcBoardService().sync_board_index_catalog(trade_date)
+        logger.info(f"✅ 东财板块词典同步完成: fetched={stats.get('fetched', 0)}, saved={stats.get('saved', 0)}")
+    except Exception as e:
+        logger.warning(f"⚠️  东财板块词典同步失败，使用已有本地词典降级: {e}")
+
+    # 保留同花顺词典同步作为灰度兼容层，涨停标签仍由 limit_list_ths 提供
+    try:
+        from backend.services.ths_board_service import ThsBoardService
+        stats = ThsBoardService().sync_board_index_catalog(force=True)
+        logger.info(f"✅ 同花顺板块词典同步完成: fetched={stats.get('fetched', 0)}, saved={stats.get('saved', 0)}")
+    except Exception as e:
+        logger.warning(f"⚠️  同花顺板块词典同步失败，使用已有本地词典降级: {e}")
+    
+    # 初始化新闻数据库表（独立数据库引擎）
+    try:
+        from backend.services.news_database import init_news_tables
+        init_news_tables()
+        logger.info("新闻数据库表创建完成")
+    except Exception as e:
+        logger.warning(f"新闻数据库表创建失败: {e}")
+
     # 初始化预置策略模板
     try:
         from backend.services.strategy_service import init_strategy_templates
@@ -50,14 +87,46 @@ async def lifespan(app: FastAPI):
 
     # 注入通达信MCP接口
     try:
-        # 优先使用环境变量配置的 HTTP 客户端
-        from backend.services.tdx_mcp_client import mcp_query_wrapper
-        stock.set_tdx_mcp_func(mcp_query_wrapper)
-        logger.info("✅ 通达信MCP接口注入成功 (HTTP 模式)")
+        # 优先使用系统级 MCP 工具
+        from importlib import import_module
+        mcp_module = import_module("mcp_Tong_Da_Xin_MCP_tdx_wenda_quotes")
+        mcp_func = mcp_module.mcp_Tong_Da_Xin_MCP_tdx_wenda_quotes
+        stock.set_tdx_mcp_func(mcp_func)
+        logger.info("✅ 通达信MCP接口注入成功 (系统 MCP 模式)")
     except Exception as e:
-        logger.warning(f"⚠️  通达信MCP接口不可用: {e}")
+        logger.warning(f"⚠️  系统MCP工具不可用: {e}")
+        try:
+            # 降级到 HTTP 客户端
+            from backend.services.tdx_mcp_client import mcp_query_wrapper
+            stock.set_tdx_mcp_func(mcp_query_wrapper)
+            logger.info("✅ 通达信MCP接口注入成功 (HTTP 模式)")
+        except Exception as e2:
+            logger.warning(f"⚠️  HTTP客户端也不可用: {e2}")
+
+    # 检查本地日线数据路径（MCP降级用）
+    tdx_vipdoc = os.getenv("TDX_VIPDOC_PATH", "")
+    if tdx_vipdoc and os.path.isdir(tdx_vipdoc):
+        logger.info(f"✅ 本地通达信数据路径就绪: {tdx_vipdoc}")
+    else:
+        logger.warning(f"⚠️  本地通达信数据路径不可用: {tdx_vipdoc}")
+
+    # 启动新闻增量抓取调度器
+    news_scheduler = None
+    try:
+        from backend.services.news_scheduler import get_news_scheduler
+        news_scheduler = get_news_scheduler()
+        news_scheduler.start()
+        logger.info("✅ 新闻增量抓取调度器启动成功")
+    except Exception as e:
+        logger.warning(f"⚠️  新闻调度器启动失败: {e}")
 
     yield
+    
+    # 关闭新闻调度器
+    if news_scheduler:
+        news_scheduler.stop()
+        logger.info("✅ 新闻增量抓取调度器已停止")
+    
     logger.info("关闭选股通知系统...")
 
 
@@ -69,6 +138,50 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def root():
+    return HTMLResponse("""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>选股通知系统</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
+        .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); text-align: center; max-width: 400px; }
+        h1 { color: #1a1a1a; font-size: 22px; margin-bottom: 8px; }
+        p { color: #666; margin: 6px 0; }
+        .links { margin-top: 24px; }
+        a { display: block; padding: 10px; margin: 8px 0; border-radius: 8px; text-decoration: none; color: white; font-weight: 500; }
+        a.frontend { background: #1677ff; }
+        a.docs { background: #52c41a; }
+        a:hover { opacity: 0.85; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>选股通知系统</h1>
+        <p>后端服务运行中</p>
+        <div class="links">
+            <a class="frontend" href="http://localhost:8080" target="_blank">打开前端页面</a>
+            <a class="docs" href="/docs" target="_blank">API 文档 (Swagger)</a>
+        </div>
+    </div>
+</body>
+</html>
+    """)
+
+@app.get("/api/v1/scheduler/status", include_in_schema=False)
+async def scheduler_status():
+    """新闻调度器状态（独立路由）"""
+    try:
+        from backend.services.news_scheduler import get_news_scheduler
+        s = get_news_scheduler()
+        return {"code": 200, "message": "success", "data": s.get_status()}
+    except Exception as e:
+        return {"code": 200, "message": "scheduler not running", "data": {"running": False, "error": str(e)}}
 
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
@@ -114,9 +227,31 @@ app.include_router(stock.router, prefix="/api/v1", tags=["选股"])
 app.include_router(task.router, prefix="/api/v1/tasks", tags=["任务"])
 app.include_router(config.router, prefix="/api/v1/config", tags=["配置"])
 app.include_router(strategy.router, prefix="/api/v1", tags=["选股策略"])
+app.include_router(stock_detail.router)
+app.include_router(score_v2.router)
+app.include_router(anomaly.router)
+app.include_router(overview_brief.router)
+app.include_router(news_v2.router)
 app.include_router(auth_routes.router)
 
 from backend.services.websocket_service import websocket_endpoint, get_connection_stats
+
+import os as _os
+import importlib as _importlib
+
+@app.get("/api/v1/model/status", tags=["模型"])
+async def model_status():
+    """获取LightGBM模型状态"""
+    model_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', 'models', 'active_auction_lgbm.pkl')
+    exists = _os.path.exists(model_path)
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "enabled": exists,
+            "model_path": model_path if exists else None,
+        }
+    }
 
 @app.websocket("/ws")
 async def websocket_route(websocket: WebSocket):

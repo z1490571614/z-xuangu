@@ -144,9 +144,7 @@ def calculate_ladder_break(ctx: Dict) -> Dict:
             score += 2
             tips.append(f"{name}连板股稀少")
 
-        if days <= 1 and up >= 5:
-            score += 3
-            tips.append(f"{name}新上榜首日爆发")
+        # 首日爆发说明题材刚发酵，更多是持续性观察项，不应直接作为退潮风险扣分。
 
     return {"score": min(score, 15), "tips": tips[:3], "data_status": "available" if hot_boards else "insufficient_data"}
 

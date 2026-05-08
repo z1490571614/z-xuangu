@@ -257,7 +257,7 @@ def setup_logging(
 
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(HumanFormatter())
-        console_handler.setLevel(logging.WARNING)
+        console_handler.setLevel(logging.INFO)
         root_logger.addHandler(console_handler)
 
     root_logger.info(f"日志系统初始化完成 | 级别={log_level}, 目录={log_dir}")
