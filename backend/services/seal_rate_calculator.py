@@ -525,39 +525,3 @@ class SealRateCalculator:
         )
 
         return passed_results, all_results
-
-
-def calculate_seal_rate_for_stocks(
-    ts_codes: List[str],
-    trade_date: str,
-    period_days: int = 100,
-    min_seal_rate: Optional[float] = None
-) -> Dict[str, Any]:
-    """
-    批量计算封板率的便捷函数
-
-    Args:
-        ts_codes: 股票代码列表
-        trade_date: 计算基准日
-        period_days: 周期天数
-        min_seal_rate: 最小封板率阈值
-
-    Returns:
-        结果字典
-    """
-    with SealRateCalculator() as calculator:
-        passed, all_results = calculator.batch_calculate_seal_rate(
-            ts_codes=ts_codes,
-            trade_date=trade_date,
-            period_days=period_days,
-            min_seal_rate=min_seal_rate
-        )
-
-    return {
-        'trade_date': trade_date,
-        'period_days': period_days,
-        'total_count': len(ts_codes),
-        'passed_count': len(passed),
-        'passed_stocks': passed,
-        'all_results': all_results,
-    }

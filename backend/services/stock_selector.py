@@ -110,7 +110,7 @@ class StockSelectorService:
 
         # 合并结果
         final_stocks = self._merge_results(
-            phase1.data, phase2.data, phase3.data if phase3 else None, min_open_change_pct, min_seal_rate
+            phase1.data, phase2.data, phase3.data if phase3 else None, min_open_change_pct, min_seal_rate, trade_date
         )
 
         # 丰富数据：获取同花顺涨停榜单 + 上一日换手率
@@ -149,9 +149,7 @@ class StockSelectorService:
             result = PhaseResult(phase_name="选股", source="tdx_mcp")
             try:
                 logger.info("========== 阶段1：通达信 MCP 选股 ==========")
-                for i, task in enumerate(tasks):
-                    self.tdx_selector.add_task(task)
-
+                self.tdx_selector.tasks = list(tasks)
                 selection_result = self.tdx_selector.select(tdx_mcp_func=tdx_mcp_func)
                 total_count = selection_result.get("total_count", 0)
 
@@ -487,6 +485,7 @@ class StockSelectorService:
         phase3_data: Optional[Dict[str, Any]],
         min_open_change_pct: Optional[float],
         min_seal_rate: Optional[float] = None,
+        trade_date: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """合并三阶段结果并计算规则评分"""
         phase1_stocks = phase1_data.get("stocks", [])
@@ -495,6 +494,11 @@ class StockSelectorService:
 
         analysis = phase2_data.get("analysis", {}) if phase2_data else {}
         seal_rates = phase3_data.get("seal_rates", {}) if phase3_data else {}
+        local_fallback_metrics = self._build_phase1_metric_fallbacks(
+            phase1_stocks,
+            trade_date=trade_date,
+            seal_rates=seal_rates,
+        )
 
         merged = []
         for stock in phase1_stocks:
@@ -516,6 +520,12 @@ class StockSelectorService:
                 "concept": stock.concept,
             }
 
+            local_fallback = local_fallback_metrics.get(ts_code, {})
+            if stock_data.get("limit_up_count") is None and local_fallback.get("limit_up_count") is not None:
+                stock_data["limit_up_count"] = local_fallback["limit_up_count"]
+            if stock_data.get("rise_10d_pct") is None and local_fallback.get("rise_10d_pct") is not None:
+                stock_data["rise_10d_pct"] = local_fallback["rise_10d_pct"]
+
             # 添加阶段2数据
             if ts_code in analysis:
                 p2 = analysis[ts_code]
@@ -530,6 +540,8 @@ class StockSelectorService:
                 stock_data["touch_days"] = seal_rates[ts_code].get("touch_days")
                 stock_data["limit_up_days"] = seal_rates[ts_code].get("limit_up_days")
                 stock_data["seal_rate"] = seal_rates[ts_code].get("seal_rate")
+                if stock_data.get("limit_up_count") is None:
+                    stock_data["limit_up_count"] = stock_data.get("limit_up_days")
 
             # 过滤封板率低于阈值的股票
             if min_seal_rate is not None:
@@ -593,6 +605,68 @@ class StockSelectorService:
                 s["final_score"] = round(s.get("rule_score", 0), 2)
 
         return merged
+
+    def _build_phase1_metric_fallbacks(
+        self,
+        phase1_stocks: List[TdxStockResult],
+        trade_date: Optional[str],
+        seal_rates: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """用本地日线兜底 MCP 未返回的涨停次数和10日涨幅。"""
+        needs = [
+            s for s in phase1_stocks
+            if s.limit_up_count is None or s.rise_10d_pct is None
+        ]
+        if not needs:
+            return {}
+
+        fallbacks: Dict[str, Dict[str, Any]] = {}
+        for s in needs:
+            if s.limit_up_count is None and s.ts_code in seal_rates:
+                limit_up_days = seal_rates[s.ts_code].get("limit_up_days")
+                if limit_up_days is not None:
+                    fallbacks.setdefault(s.ts_code, {})["limit_up_count"] = limit_up_days
+
+        try:
+            from backend.services.tdx_local_selector import (
+                TdxLocalSelectorService,
+                get_limit_price,
+            )
+
+            local_selector = TdxLocalSelectorService()
+            for stock in needs:
+                path = local_selector._ts_code_to_day_path(stock.ts_code)
+                if not path or not os.path.exists(path):
+                    continue
+
+                records = local_selector._read_day_file(path)
+                if trade_date:
+                    cutoff = int(trade_date)
+                    records = [r for r in records if r[0] <= cutoff]
+                records.sort(key=lambda x: x[0])
+                if len(records) < 2:
+                    continue
+
+                metrics = fallbacks.setdefault(stock.ts_code, {})
+                close_price = records[-1][4]
+                if stock.rise_10d_pct is None and len(records) >= 11:
+                    base_close = records[-11][4]
+                    if base_close > 0:
+                        metrics["rise_10d_pct"] = round((close_price - base_close) / base_close * 100, 2)
+
+                if stock.limit_up_count is None and "limit_up_count" not in metrics:
+                    last_100 = records[-101:] if len(records) >= 101 else records[:]
+                    code_num = stock.ts_code.split(".")[0]
+                    limit_count = 0
+                    for i in range(1, len(last_100)):
+                        limit_price = get_limit_price(code_num, last_100[i - 1][4])
+                        if abs(last_100[i][4] - limit_price) < 0.01:
+                            limit_count += 1
+                    metrics["limit_up_count"] = limit_count
+        except Exception as e:
+            logger.warning(f"本地日线兜底阶段1指标失败: {e}")
+
+        return fallbacks
 
     def _build_final_result(
         self,

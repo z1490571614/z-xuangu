@@ -167,75 +167,6 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info("WebSocket客户端断开连接")
 
 
-async def push_task_update(task_data: dict):
-    """
-    推送任务状态更新
-
-    Args:
-        task_data: 任务数据字典
-            {
-                "event": "task_started" | "task_completed" | "task_failed",
-                "task_id": int,
-                "task_name": str,
-                "status": str,
-                "message": str,
-                ...
-            }
-    """
-    message = {
-        **task_data,
-        "timestamp": datetime.now().isoformat(),
-        "source": "task_manager"
-    }
-    await manager.broadcast_to_channel(message, "tasks")
-    logger.info(f"推送任务更新: {task_data.get('event')} - {task_data.get('task_name')}")
-
-
-async def push_stock_selection_update(selection_data: dict):
-    """
-    推送选股结果更新
-
-    Args:
-        selection_data: 选股数据字典
-            {
-                "event": "selection_started" | "selection_completed" | "stock_found",
-                "record_id": int,
-                "trade_date": str,
-                "total_count": int,
-                ...
-            }
-    """
-    message = {
-        **selection_data,
-        "timestamp": datetime.now().isoformat(),
-        "source": "stock_selector"
-    }
-    await manager.broadcast_to_channel(message, "stocks")
-    logger.info(f"推送选股更新: {selection_data.get('event')}")
-
-
-async def push_system_notification(notification: dict):
-    """
-    推送系统通知
-
-    Args:
-        notification: 通知数据
-            {
-                "level": "info" | "warning" | "error",
-                "title": str,
-                "message": str,
-                ...
-            }
-    """
-    message = {
-        **notification,
-        "timestamp": datetime.now().isoformat(),
-        "source": "system"
-    }
-    await manager.broadcast_to_all(message)
-    logger.info(f"推送系统通知: {notification.get('title')}")
-
-
 def get_connection_stats() -> dict:
     """获取连接统计信息"""
     return {
@@ -253,8 +184,5 @@ def get_connection_stats() -> dict:
 __all__ = [
     'manager',
     'websocket_endpoint',
-    'push_task_update',
-    'push_stock_selection_update',
-    'push_system_notification',
     'get_connection_stats'
 ]

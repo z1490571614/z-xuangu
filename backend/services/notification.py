@@ -203,18 +203,3 @@ class FeishuNotifier:
         """
         message = self.build_selection_message(result)
         return self.send_message(message)
-
-    async def send_test_notification(self) -> bool:
-        """
-        发送测试通知
-
-        Returns:
-            是否发送成功
-        """
-        message = {
-            "msg_type": "text",
-            "content": {
-                "text": "🔔 选股通知系统测试消息\n\n如果您收到此消息，说明飞书通知配置正确！"
-            }
-        }
-        return await self.send_message_async(message)

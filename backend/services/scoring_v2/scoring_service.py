@@ -17,17 +17,8 @@ logger = logging.getLogger(__name__)
 
 SCORE_VERSION = "score_v2.0"
 
-# 全局开关（兼容阶段控制）
-_score_v2_enabled = True
-
-
-def set_score_v2_enabled(enabled: bool):
-    global _score_v2_enabled
-    _score_v2_enabled = enabled
-
-
 def is_score_v2_enabled() -> bool:
-    return _score_v2_enabled
+    return True
 
 
 class StockScoringV2Service:
@@ -47,9 +38,6 @@ class StockScoringV2Service:
         has_news_positive: Optional[bool] = None,
     ) -> Optional[Dict[str, Any]]:
         """对单只股票执行完整评分V2流程"""
-        if not _score_v2_enabled:
-            return None
-
         try:
             event_driven = stock_data.get("has_news_positive") if has_news_positive is None else has_news_positive
 

@@ -6,7 +6,7 @@ from backend.services.scoring_v2.alpha_score_service import AlphaScoreService
 from backend.services.scoring_v2.risk_score_service import RiskScoreService
 from backend.services.scoring_v2.final_score_service import FinalScoreService
 from backend.services.scoring_v2.decision_engine import DecisionEngine
-from backend.services.scoring_v2.scoring_service import StockScoringV2Service, is_score_v2_enabled, set_score_v2_enabled
+from backend.services.scoring_v2.scoring_service import StockScoringV2Service, is_score_v2_enabled
 
 __all__ = [
     "AlphaScoreService",
@@ -15,5 +15,4 @@ __all__ = [
     "DecisionEngine",
     "StockScoringV2Service",
     "is_score_v2_enabled",
-    "set_score_v2_enabled",
 ]

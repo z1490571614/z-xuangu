@@ -13,13 +13,6 @@ class RuleScoreService:
     五维加权评分，满分100分
     """
 
-    # 各维度权重
-    WEIGHTS = {
-        "limit_up_gene": 25,       # 涨停基因
-        "seal_reliability": 25,    # 封板可靠性
-        "trend_strength": 15,      # 短期趋势
-        "auction_momentum": 35,    # 竞价承接
-    }
     # 风险扣分上限
     MAX_RISK_DEDUCTION = 30
 

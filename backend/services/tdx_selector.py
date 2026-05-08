@@ -205,16 +205,6 @@ class CallAuctionCondition(SelectionCondition):
         )
 
 
-CONDITION_REGISTRY: Dict[str, type] = {
-    "basic_filter": BasicFilterCondition,
-    "market_cap": MarketCapCondition,
-    "price": PriceCondition,
-    "trend": TrendCondition,
-    "limit_up": LimitUpCondition,
-    "call_auction": CallAuctionCondition,
-}
-
-
 @dataclass
 class SelectionTask:
     """
@@ -227,6 +217,12 @@ class SelectionTask:
     conditions: List[SelectionCondition] = field(default_factory=list)
     page_size: int = 50
     market: str = "AG"
+    return_fields: List[str] = field(default_factory=lambda: [
+        "竞昨比",
+        "竞价换手率",
+        "涨停次数",
+        "近10日涨幅",
+    ])
 
     def build_query(self) -> str:
         """构建完整的查询语句"""
@@ -239,6 +235,8 @@ class SelectionTask:
             else:
                 logger.warning(f"任务[{self.task_id}] 条件[{cond.name}] 验证失败，已跳过")
         query = "，".join(parts)
+        if self.return_fields:
+            query = f"{query}，并显示{'、'.join(self.return_fields)}"
         logger.debug(f"任务[{self.task_id}] 查询语句: {query}")
         return query
 
@@ -358,13 +356,22 @@ HEADER_FIELD_MAP: Dict[str, str] = {
     "封成比": "seal_rate",
     "涨停区间次数": "limit_up_count",
     "涨停次数": "limit_up_count",
+    "100天涨停次数": "limit_up_count",
+    "100日涨停次数": "limit_up_count",
+    "100天内涨停次数": "limit_up_count",
+    "近100日涨停次数": "limit_up_count",
+    "近100天涨停次数": "limit_up_count",
     "封板成功率": "seal_rate",
     "封板率": "seal_rate",
     "涨幅(%)": "rise_10d_pct",
     "10日涨幅": "rise_10d_pct",
     "近10日涨幅": "rise_10d_pct",
+    "近10日股价涨幅": "rise_10d_pct",
+    "近10天涨幅": "rise_10d_pct",
     "竞价量占比": "auction_ratio",
     "竞昨比": "auction_ratio",
+    "竞价量占昨日成交量比例": "auction_ratio",
+    "竞价量/昨日成交量": "auction_ratio",
     "[1]/[2]": "auction_ratio",
     "竞价换手率": "auction_turnover_rate",
     "换手率": "auction_turnover_rate",
@@ -560,10 +567,6 @@ class TdxSelectorService:
         """添加选股任务"""
         self.tasks.append(task)
         logger.info(f"添加选股任务: [{task.task_id}] {task.task_name}")
-
-    def clear_tasks(self) -> None:
-        """清空所有任务"""
-        self.tasks.clear()
 
     def select(self, tdx_mcp_func=None) -> Dict[str, Any]:
         """
