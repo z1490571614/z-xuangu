@@ -1,10 +1,21 @@
 import pandas as pd
 
-from backend.database import SessionLocal
+from backend.database import Base, engine, SessionLocal
 from backend.models.stock_ths_board import ThsBoardIndex
 from backend.services.dc_board_service import DcBoardService
 from backend.services.dragon_leader.data.theme_context import ThemeContext
 from backend.services.ths_board_service import ThsBoardService
+
+
+def setup_function():
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        db.query(ThsBoardIndex).delete()
+        db.commit()
+    finally:
+        db.close()
+    ThsBoardService.clear_catalog_cache()
 
 
 def test_theme_context_reads_stock_boards_from_dc_service(monkeypatch):

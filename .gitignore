@@ -64,3 +64,5 @@ frontend/dist/
 frontend/.nuxt
 frontend/.output
 frontend/.cache
+frontend/playwright-report/
+frontend/test-results/

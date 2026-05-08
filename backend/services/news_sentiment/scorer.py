@@ -13,7 +13,7 @@ from backend.services.news_sentiment.rules.regulatory import (
 )
 from backend.services.news_sentiment.rules.process import (
     score_policy, score_product_tech, score_capacity, score_personnel,
-    score_clarification, score_abnormal_movement, score_process,
+    score_clarification, score_abnormal_movement, score_risk_warning, score_process,
 )
 from backend.services.news_sentiment.constants import CERTAINTY_TYPES
 
@@ -77,6 +77,11 @@ def score_event(event_type: str, text: str, facts: Dict[str, Any]) -> Tuple[floa
 
     elif event_type == "inquiry":
         score = score_inquiry(text, facts)
+
+    elif event_type == "risk_warning":
+        score = score_risk_warning(text)
+        event_subtype = "trading_risk_warning"
+        certainty = "completed"
 
     elif event_type == "litigation":
         score = score_litigation(text, facts)

@@ -10,9 +10,32 @@ SECTOR_NAME_MAP = {
     "科创板": "科创板(科技创新)",
 }
 
+DICTIONARY_BOARD_MATCHES = {
+    "news_theme_board",
+    "limit_tag_board",
+    "selected_concept_board",
+    "selected_board_type_board",
+    "selected_industry_board",
+    "exact_lu_desc_board",
+    "exact_hint_board",
+}
+REFERENCE_BOARD_MATCHES = {"limit_cpt_list_reference", "semantic_reference_board"}
+
 
 def _fmt_sector(name: str) -> str:
     return SECTOR_NAME_MAP.get(name, name)
+
+
+def _evidence_boards(boards):
+    return [board for board in boards if board.get("matched_from") not in REFERENCE_BOARD_MATCHES]
+
+
+def _has_ladder_data(board: Dict[str, Any]) -> bool:
+    try:
+        rank = int(board.get("rank", 999) or 999)
+    except (TypeError, ValueError):
+        rank = 999
+    return rank < 999 or (board.get("up_nums", 0) or 0) > 0 or (board.get("days", 0) or 0) > 0
 
 
 def calculate_leader_position_loss(ctx: Dict) -> Dict:
@@ -124,14 +147,19 @@ def calculate_ladder_break(ctx: Dict) -> Dict:
     tips = []
     theme = ctx.get("theme", {})
     theme_rank = theme.get("theme_rank", {})
-    hot_boards = theme_rank.get("hot_boards", [])
+    hot_boards = _evidence_boards(theme_rank.get("hot_boards", []))
+    primary_board = theme_rank.get("primary_board", {}) or {}
+    primary_matched_from = primary_board.get("matched_from", "")
+    has_confirmed_primary = primary_matched_from in DICTIONARY_BOARD_MATCHES
 
     best_rank = theme_rank.get("best_rank", 999)
-    if best_rank > 20:
+    if best_rank > 20 and not has_confirmed_primary:
         score += 5
         tips.append("所属题材未进热点排行，梯队偏弱")
 
     for board in hot_boards[:2]:
+        if not _has_ladder_data(board):
+            continue
         name = _fmt_sector(board.get("name", ""))
         cons = board.get("cons_nums", 0)
         up = board.get("up_nums", 0)

@@ -25,11 +25,28 @@ EASTMONEY_SOURCE = "eastmoney"
 DC_BOARD_TYPES = ("概念板块", "行业板块", "地域板块")
 LOW_PRIORITY_BOARD_TYPES = {"地域板块", "地域", "area", "AREA"}
 
-BOARD_ALIASES: Dict[str, List[str]] = {
+MANUAL_BOARD_ALIASES: Dict[str, List[str]] = {
     "算力租赁": ["智算租赁", "智算租赁服务", "算力服务", "算力租赁服务"],
+    "算力概念": ["算力租赁", "智算租赁", "智算租赁服务", "算力服务", "算力销售", "算力租赁服务", "AI算力", "智算中心"],
     "人工智能": ["AI", "AIGC", "AI应用"],
     "通信设备": ["通信", "通讯设备", "通信服务"],
 }
+
+
+def _merge_board_aliases(*sources: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    merged: Dict[str, List[str]] = {}
+    for source in sources:
+        for board_name, aliases in source.items():
+            values = merged.setdefault(board_name, [])
+            seen = set(values)
+            for alias in aliases:
+                if alias and alias not in seen:
+                    values.append(alias)
+                    seen.add(alias)
+    return merged
+
+
+BOARD_ALIASES: Dict[str, List[str]] = MANUAL_BOARD_ALIASES
 
 
 class DcBoardService:
@@ -283,6 +300,7 @@ class DcBoardService:
         if not force_reload and self.__class__._shared_catalog_cache is not None:
             return self.__class__._shared_catalog_cache
 
+        board_aliases = self._get_board_aliases()
         db = SessionLocal()
         try:
             rows = db.query(BoardIndex).filter(
@@ -296,7 +314,7 @@ class DcBoardService:
                     "type": row.board_type or "",
                     "source": row.source or EASTMONEY_SOURCE,
                     "clean_name": self._clean_text(row.board_name),
-                    "aliases": [self._clean_text(a) for a in BOARD_ALIASES.get(row.board_name, [])],
+                    "aliases": [self._clean_text(a) for a in board_aliases.get(row.board_name, [])],
                 }
                 for row in rows
                 if row.board_code and row.board_name
@@ -305,6 +323,15 @@ class DcBoardService:
             return catalog
         finally:
             db.close()
+
+    def _get_board_aliases(self) -> Dict[str, List[str]]:
+        try:
+            from backend.services.dc_board_alias_service import DcBoardAliasService
+            runtime_aliases = DcBoardAliasService().get_active_aliases()
+        except Exception as e:
+            logger.debug(f"读取动态东财板块别名失败，使用手写别名降级: {e}")
+            runtime_aliases = {}
+        return _merge_board_aliases(runtime_aliases, MANUAL_BOARD_ALIASES)
 
     def _refresh_one_stock_boards(self, ts_code: str, trade_date: str) -> List[Dict[str, Any]]:
         try:

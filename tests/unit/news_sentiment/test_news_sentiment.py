@@ -134,6 +134,38 @@ def test_sector_intraday_rally_news_should_be_neutral_for_target_stock():
     assert r["score"] == 0.0
 
 
+def test_roundup_news_selected_should_not_be_assigned_to_target_stock_risk():
+    """新闻精选/汇总类文本即使提到个股和监管词，也不归因为该股利空"""
+    title = "财联社4月30日早间新闻精选"
+    content = (
+        "1、证监会表示将加强上市公司监管。"
+        "2、国晟科技发布股票交易异常波动公告。"
+        "3、多家公司披露一季报，部分公司净利润同比下降。"
+        "4、机器人板块、算力租赁板块盘面活跃，多股涨停。"
+    )
+    r = analyze_news_event({"title": title, "content": content, "stock_name": "国晟科技", "source": "cls"})
+    assert r["event_type"] == "market_overview"
+    assert r["event_subtype"] == "target_stock_mention"
+    assert r["sentiment"] == "neutral"
+    assert r["score"] == 0.0
+
+
+def test_single_stock_trading_risk_warning_should_be_weak_negative():
+    """个股交易风险提示/高估值/业绩风险提示应判为轻度利空"""
+    title = "国晟科技：股票自年初至5月8日期间累计涨幅达53.35% 市净率远高于行业平均水平"
+    content = (
+        "国晟科技发布股票交易风险提示公告称，公司股票价格短期波动较大。"
+        "截至5月8日，公司市净率为60.58，远高于行业平均水平。"
+        "敬请广大投资者注意二级市场交易风险，注意公司业绩风险，审慎投资。"
+    )
+    r = analyze_news_event({"title": title, "content": content, "stock_name": "国晟科技", "source": "公告"})
+    assert r["event_type"] == "risk_warning"
+    assert r["event_subtype"] == "trading_risk_warning"
+    assert r["sentiment"] == "negative"
+    assert r["impact_level"] == "weak"
+    assert -1.5 < r["score"] <= -0.3
+
+
 def test_yoy_drop_with_qoq_turnaround_should_not_be_positive():
     """14.4 同比下降+环比扭亏不能判利好"""
     r = analyze_news_event({"title": "狮头股份：第一季度净利润同比下降9.73%",

@@ -5,7 +5,6 @@ import json
 import math
 import logging
 from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime, timedelta
 
 from backend.database import SessionLocal
 from backend.models.stock_lhb import StockLhb
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # 游资/机构席位匹配规则 - 使用统一席位库
 from backend.services.seat_library import (
-    match_seat_tag, SEAT_PREMIUM, SEAT_KNOCK, SEAT_SCATTER, SEAT_INST
+    match_seat_tag,
 )
 
 # 游资风格标签（辅助识别游资接力价值）

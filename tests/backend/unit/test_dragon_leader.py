@@ -491,8 +491,8 @@ class TestPhase2ThemeScoring:
         assert any("主跟随题材：算力租赁，涨停标签确认" in tip for tip in result["tips"])
         assert not any("归一命中" in tip for tip in result["tips"])
 
-    def test_dictionary_primary_keeps_hot_board_strength_followups(self, monkeypatch):
-        """归一结果定主线后，热榜题材仍参与强度和持续性判断"""
+    def test_dictionary_primary_keeps_semantic_hot_board_as_reference_only(self, monkeypatch):
+        """归一结果定主线后，语义扩展出的泛热点只作参考，不进入依据"""
         from backend.services.dragon_leader.data.theme_context import ThemeContext
         from backend.services.dragon_leader.scorer.leader_scorer import calculate_theme_strength
         ctx = ThemeContext()
@@ -516,10 +516,32 @@ class TestPhase2ThemeScoring:
         result = calculate_theme_strength({"theme": {"theme_rank": theme_rank}})
 
         assert theme_rank["best_name"] == "算力租赁"
-        assert any(board.get("name") == "人工智能" for board in theme_rank["hot_boards"])
-        assert any("人工智能涨停29家，板块效应强" in tip for tip in result["tips"])
-        assert any("人工智能持续9天，题材有持续性" in tip for tip in result["tips"])
-        assert result["tips"][1] == "人工智能涨停29家，板块效应强"
+        assert not any(board.get("name") == "人工智能" for board in theme_rank["hot_boards"])
+        assert any(board.get("name") == "人工智能" for board in theme_rank.get("reference_hot_boards", []))
+        assert not any("人工智能涨停29家，板块效应强" in tip for tip in result["tips"])
+        assert not any("人工智能持续9天，题材有持续性" in tip for tip in result["tips"])
+
+    def test_ladder_break_ignores_rankless_dictionary_primary_and_reference_board(self):
+        """涨停标签/新闻主题已确认主线时，不用热榜缺席和参考热点制造矛盾风险"""
+        from backend.services.dragon_leader.scorer.retreat_scorer import calculate_ladder_break
+
+        ctx = {"theme": {"theme_rank": {
+            "best_rank": 999,
+            "best_name": "算力概念",
+            "primary_board": {"name": "算力概念", "matched_from": "limit_tag_board"},
+            "hot_boards": [
+                {"name": "算力概念", "rank": 999, "up_nums": 0, "cons_nums": 0, "matched_from": "limit_tag_board"},
+                {"name": "人工智能", "rank": 2, "up_nums": 29, "cons_nums": 0, "matched_from": "semantic_reference_board"},
+            ],
+            "reference_hot_boards": [
+                {"name": "人工智能", "rank": 2, "up_nums": 29, "cons_nums": 0, "matched_from": "semantic_reference_board"},
+            ],
+        }}}
+
+        result = calculate_ladder_break(ctx)
+
+        assert not any("所属题材未进热点排行" in tip for tip in result["tips"])
+        assert not any("人工智能" in tip for tip in result["tips"])
 
     def test_theme_strength_no_match(self):
         """题材强度评分：未上榜"""

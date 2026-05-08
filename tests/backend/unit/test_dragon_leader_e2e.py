@@ -200,9 +200,9 @@ class TestDragonLeaderE2E:
 
     def test_scenario_quant_seat_dominated(self):
         """
-        场景16.5: 量化席位主导
-        输入: 龙虎榜量化席位买入较多+买榜无高溢价游资
-        预期: lhb_penalty_score为负, lhb_alpha_score为负
+        场景16.5: 砸盘席位方向分化
+        输入: 散户席位净买入较多，同时核按钮席位净卖出
+        预期: 净买入的砸盘席位扣分，净卖出的砸盘席位加分，最终按净方向合并
         """
         from backend.services.dragon_leader.lhb_alpha import calculate_lhb_alpha
         lhb_data = {
@@ -224,7 +224,8 @@ class TestDragonLeaderE2E:
         }
         lhb_result = calculate_lhb_alpha(lhb_data)
 
-        assert lhb_result["lhb_penalty_score"] < 0, f"量化席位应扣分，实际={lhb_result['lhb_penalty_score']}"
-        assert lhb_result["lhb_alpha_score"] < 0, f"龙虎榜净分应为负，实际={lhb_result['lhb_alpha_score']}"
+        assert lhb_result["lhb_penalty_score"] < 0, f"砸盘席位净买入应扣分，实际={lhb_result['lhb_penalty_score']}"
+        assert lhb_result["lhb_bonus_score"] > 0, f"砸盘席位净卖出应加分，实际={lhb_result['lhb_bonus_score']}"
+        assert lhb_result["lhb_alpha_score"] > 0, f"龙虎榜净方向应为正，实际={lhb_result['lhb_alpha_score']}"
         assert any("散户" in t for t in lhb_result.get("tips", [])), "提示应包含散户席位信息"
         assert any("核按钮" in t for t in lhb_result.get("tips", [])), "提示应包含核按钮席位信息"

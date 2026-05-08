@@ -2,22 +2,21 @@
 FastAPI 应用入口
 """
 import os
-import tempfile
 from datetime import datetime
 tushare_cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'tushare_cache')
 os.makedirs(tushare_cache_dir, exist_ok=True)
 os.environ.setdefault('TUSHARE_PRO_SAVE_PATH', tushare_cache_dir)
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocket
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-from backend.core.logging_config import setup_logging, get_logger, RequestLoggerMiddleware
+from backend.core.logging_config import setup_logging, get_logger
 setup_logging(
     log_dir=os.getenv("LOG_DIR", "logs"),
     log_level=os.getenv("LOG_LEVEL", "INFO"),
@@ -29,7 +28,15 @@ from backend.database import engine, Base
 from backend.models.stock_lhb import StockLhb
 from backend.models.stock_risk import StockRiskBreakdown  # 确保表在 create_all 前注册
 from backend.models.stock_ths_board import ThsBoardIndex, StockThsBoardMember
-from backend.models.board import BoardIndex, StockBoardMember, BoardDailySnapshot, BoardStrengthSnapshot
+from backend.models.board import (
+    BoardIndex,
+    StockBoardMember,
+    BoardDailySnapshot,
+    BoardStrengthSnapshot,
+    DcBoardAlias,
+    DcBoardAliasObservation,
+    DcBoardAliasSyncState,
+)
 from backend.models import (
     SelectionRecord, SelectedStock,
     StockScoreV2, StockScoreBreakdownV2, StockRiskBreakdownV2,
@@ -58,6 +65,19 @@ async def lifespan(app: FastAPI):
         trade_date = get_latest_trading_day()
         stats = DcBoardService().sync_board_index_catalog(trade_date)
         logger.info(f"✅ 东财板块词典同步完成: fetched={stats.get('fetched', 0)}, saved={stats.get('saved', 0)}")
+
+        try:
+            from backend.services.dc_board_alias_service import DcBoardAliasService
+            now = datetime.now()
+            finalize_aliases = now.hour > 15 or (now.hour == 15 and now.minute >= 30)
+            alias_stats = DcBoardAliasService().sync_trade_date(trade_date, finalize=finalize_aliases)
+            logger.info(
+                "✅ 东财动态别名同步完成: "
+                f"trade_date={trade_date}, source_rows={alias_stats.get('source_rows', 0)}, "
+                f"inserted={alias_stats.get('inserted_observations', 0)}"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️  东财动态别名同步失败，使用已有别名降级: {e}")
     except Exception as e:
         logger.warning(f"⚠️  东财板块词典同步失败，使用已有本地词典降级: {e}")
 
@@ -237,7 +257,6 @@ app.include_router(auth_routes.router)
 from backend.services.websocket_service import websocket_endpoint, get_connection_stats
 
 import os as _os
-import importlib as _importlib
 
 @app.get("/api/v1/model/status", tags=["模型"])
 async def model_status():

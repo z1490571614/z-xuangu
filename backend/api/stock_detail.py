@@ -4,14 +4,13 @@
 import asyncio
 import json as _json
 import logging
-import os
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Query, Depends, Body
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import SelectedStock, SelectionRecord
+from backend.models import SelectedStock
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/stock/detail", tags=["股票详情"])

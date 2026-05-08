@@ -96,3 +96,73 @@ class BoardStrengthSnapshot(Base):
         UniqueConstraint("board_code", "trade_date", name="uk_board_strength_snapshot"),
         Index("idx_board_strength_trade_date", "trade_date"),
     )
+
+
+class DcBoardAlias(Base):
+    """东财板块别名汇总表，供运行期板块归一读取。"""
+
+    __tablename__ = "dc_board_alias"
+
+    id = Column(Integer, primary_key=True, index=True)
+    board_code = Column(String(32), nullable=False, index=True)
+    board_name = Column(String(100), nullable=False, index=True)
+    board_type = Column(String(32), nullable=True, index=True)
+    alias = Column(String(100), nullable=False, index=True)
+    alias_clean = Column(String(120), nullable=False, index=True)
+    source = Column(String(32), default="generated", index=True)
+    confidence_score = Column(Float, default=0)
+    match_reason = Column(String(100), nullable=True)
+    hit_count = Column(Integer, default=0)
+    stock_count = Column(Integer, default=0)
+    first_seen_date = Column(String(10), nullable=True, index=True)
+    last_seen_date = Column(String(10), nullable=True, index=True)
+    sample_stocks_json = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True, index=True)
+    review_status = Column(String(32), default="pending_review", index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("board_code", "alias_clean", name="uk_dc_board_alias"),
+        Index("idx_dc_board_alias_status", "review_status", "is_active"),
+    )
+
+
+class DcBoardAliasObservation(Base):
+    """单日单股标签命中明细，同一天多次同步靠唯一键去重。"""
+
+    __tablename__ = "dc_board_alias_observation"
+
+    id = Column(Integer, primary_key=True, index=True)
+    trade_date = Column(String(10), nullable=False, index=True)
+    ts_code = Column(String(20), nullable=False, index=True)
+    board_code = Column(String(32), nullable=False, index=True)
+    board_name = Column(String(100), nullable=False)
+    board_type = Column(String(32), nullable=True)
+    alias = Column(String(100), nullable=False)
+    alias_clean = Column(String(120), nullable=False, index=True)
+    confidence_score = Column(Float, default=0)
+    match_reason = Column(String(100), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", "board_code", "alias_clean", name="uk_dc_board_alias_observation"),
+        Index("idx_dc_board_alias_obs_date_board", "trade_date", "board_code"),
+    )
+
+
+class DcBoardAliasSyncState(Base):
+    """板块别名同步水位；当天可重复同步，盘后可标记 finalized。"""
+
+    __tablename__ = "dc_board_alias_sync_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+    trade_date = Column(String(10), nullable=False, unique=True, index=True)
+    source = Column(String(32), default="limit_list_ths", index=True)
+    status = Column(String(32), default="running", index=True)
+    source_row_count = Column(Integer, default=0)
+    observed_stock_count = Column(Integer, default=0)
+    inserted_observation_count = Column(Integer, default=0)
+    last_synced_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    finalized_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)

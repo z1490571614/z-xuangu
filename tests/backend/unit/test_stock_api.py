@@ -4,6 +4,19 @@
 import pytest
 
 
+@pytest.fixture
+def mock_select_stocks(monkeypatch):
+    """避免单元测试触发真实选股链路"""
+    def fake_select_stocks(**kwargs):
+        return {
+            "trade_date": kwargs.get("trade_date") or "20260508",
+            "passed_count": 0,
+            "stocks": [],
+        }
+
+    monkeypatch.setattr("backend.api.stock.select_stocks", fake_select_stocks)
+
+
 class TestTradingDate:
     def test_get_trading_date_success(self, client):
         """获取交易日接口应返回日期字符串"""
@@ -22,27 +35,27 @@ class TestTradingDate:
 
 
 class TestStockSelect:
-    def test_select_without_auth(self, client):
+    def test_select_without_auth(self, client, mock_select_stocks):
         """未认证可发起选股请求（公开接口，不接受500）"""
         resp = client.post("/api/v1/stock/select", json={})
         assert resp.status_code != 500, f"选股接口不应返回500: {resp.text[:200]}"
 
-    def test_select_with_invalid_date_format(self, client):
+    def test_select_with_invalid_date_format(self, client, mock_select_stocks):
         """非法日期格式不应导致500错误"""
         resp = client.post("/api/v1/stock/select", json={"trade_date": "2026-13-01"})
         assert resp.status_code != 500, f"非法日期不应导致服务器错误: {resp.text[:200]}"
 
-    def test_select_with_invalid_task_template(self, client):
+    def test_select_with_invalid_task_template(self, client, mock_select_stocks):
         """非法策略模板不应导致500错误"""
         resp = client.post("/api/v1/stock/select", json={"task_template": "nonexistent_template"})
         assert resp.status_code != 500, f"非法模板不应导致服务器错误: {resp.text[:200]}"
 
-    def test_select_with_min_seal_rate_100(self, client):
+    def test_select_with_min_seal_rate_100(self, client, mock_select_stocks):
         """设置封板率100%不应导致500错误"""
         resp = client.post("/api/v1/stock/select", json={"min_seal_rate": 100})
         assert resp.status_code != 500, f"封板率参数不应导致服务器错误: {resp.text[:200]}"
 
-    def test_select_with_high_period_days(self, client):
+    def test_select_with_high_period_days(self, client, mock_select_stocks):
         """设置较大封板率周期不应导致500错误"""
         resp = client.post("/api/v1/stock/select", json={"period_days": 250})
         assert resp.status_code != 500, f"周期参数不应导致服务器错误: {resp.text[:200]}"

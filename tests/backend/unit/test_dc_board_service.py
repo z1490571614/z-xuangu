@@ -143,6 +143,53 @@ def test_normalize_board_terms_reads_local_catalog_without_tushare_calls():
     assert matches[0]["matched_from"] == "news_theme"
 
 
+def test_normalize_computing_rental_alias_to_eastmoney_computing_concept():
+    db = SessionLocal()
+    try:
+        db.add(BoardIndex(
+            board_code="BK1134.DC",
+            board_name="算力概念",
+            board_type="概念板块",
+            source="eastmoney",
+            trade_date="20260508",
+            is_active=True,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    svc = DcBoardService()
+
+    matches = svc.normalize_board_terms("算力租赁+智算租赁服务", source="limit_tag", top_n=3)
+
+    assert matches[0]["ts_code"] == "BK1134.DC"
+    assert matches[0]["name"] == "算力概念"
+    assert any("算力" in reason for reason in matches[0]["match_reasons"])
+
+
+def test_normalize_board_terms_uses_generated_aliases():
+    db = SessionLocal()
+    try:
+        db.add(BoardIndex(
+            board_code="BK1134.DC",
+            board_name="算力概念",
+            board_type="概念板块",
+            source="eastmoney",
+            trade_date="20260508",
+            is_active=True,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    svc = DcBoardService()
+
+    matches = svc.normalize_board_terms("算力销售", source="limit_tag", top_n=3)
+
+    assert matches[0]["ts_code"] == "BK1134.DC"
+    assert matches[0]["name"] == "算力概念"
+
+
 def test_refresh_stock_boards_persists_eastmoney_membership():
     db = SessionLocal()
     try:

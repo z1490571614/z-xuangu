@@ -6,8 +6,8 @@
 |------|-----|
 | **项目名称** | 选股通知系统 (Stock Selector Notification System) |
 | **项目类型** | 量化选股 + AI分析 + 通知推送系统 |
-| **当前版本** | v5.0 (四阶段选股 + AI分析 + 新闻舆情 + 龙虎榜 + 风险拆解已完成) |
-| **最后更新** | 2026-04-30 |
+| **当前版本** | v5.2 (四阶段选股 + AI分析 + 新闻舆情 + 龙虎榜 + 风险拆解 + 龙头战法已完成) |
+| **最后更新** | 2026-05-08 |
 | **项目成熟度** | ⭐⭐⭐⭐⭐ (5/5 星 - 生产就绪) |
 
 ---
@@ -168,6 +168,10 @@
 
 ### 10. 情感分析模块开发规范
 
+系统有两套情感分析引擎，适用不同场景：
+
+#### 10.1 SentimentAnalyzer V1（加权评分规则引擎）
+
 **模块位置**: `backend/services/sentiment_analyzer.py`
 
 **算法**: 加权评分制规则引擎，非简单关键词计数
@@ -194,10 +198,59 @@ text = title + content
 
 **调用时机**: 查询时实时判断（在 `integrated_news_service.get_stock_news_from_db()` 中），不入库，规则更新立即生效
 
+#### 10.2 News Sentiment V2（事件驱动情感分析）
+
+**模块位置**: `backend/services/news_sentiment/`
+
+**定位**: 独立的纯规则事件驱动情感判定底层模块，不调用AI大模型，不绑定任何策略。
+
+**算法**: 事件识别 → 事实抽取 → 单事件评分 → 多事件冲突合并 → 确定性因子调整 → 输出
+
+**核心流程**:
+```
+news_item → normalize_text → classify_news_scope
+  ├── multi_stock/market_overview → 局部上下文判断（不归因给单股）
+  └── single_stock → classify_event_candidates → select_primary_event
+       → extract_facts → score_event（单事件）
+       → merge_event_scores（多事件冲突合并）
+       → apply CERTAINTY_FACTOR（确定性因子 ×0.5~1.0）
+       → 最终分数 [-5, +5]
+       → sentiment + impact_level + confidence + risk_flags
+```
+
+**支持的事件类型**:
+- performance（业绩预告/快报/年报）
+- reduce_holding（减持）
+- increase_holding（增持）
+- buyback（股份回购）
+- order_contract（重大合同/中标）
+- unlock（解禁）
+- restructure（重组）
+- regulatory（监管/处罚）
+- process（诉讼/立案/停产）
+
+**新闻范围分类**（关键安全机制）:
+- `single_stock`: 单股新闻，正常事件识别
+- `multi_stock`: 多股盘面综述，检查目标股票被提及情况，不做利好/利空归因
+- `market_overview`: 大盘综述，直接 neutral
+
+**确定性因子**（影响最终分数）:
+- `completed`(已完成): ×1.0
+- `forecast`(预计): ×0.7
+- `planned`(拟): ×0.6
+- `preliminary`(筹划): ×0.5
+- `framework`(框架协议): ×0.5
+- `uncertain`(存在不确定性): ×0.5
+
+**调用者**: `dragon_leader/main.py::collect_news()`, `stock_detail.py::get_stock_news()`
+
+**与V1的关系**: V2 替换 V1 用于龙头战法和新版API；V1 继续用于 integrated_news_service 中的旧版查询路径。两套引擎独立维护。
+
 ### 11. 龙虎榜模块开发规范
 
 **模块位置**
 - 核心服务: `backend/services/lhb_service.py`
+- 统一席位库: `backend/services/seat_library.py`
 - 数据模型: `backend/models/stock_lhb.py`
 - 前端组件: `frontend/src/components/stock/LhbPanel.vue`
 
@@ -208,12 +261,18 @@ text = title + content
 | `top_inst` | 席位买卖明细（营业部、买入额、卖出额、净买额） | 5000 |
 | `hm_list` | 游资名录（用于营业部→游资别名匹配） | 5000 |
 
-**席位标签规则**（纯规则匹配 20+条）:
-- `机构专用` → 机构
-- `沪股通专用` / `深股通专用` → 北向
-- `华泰证券深圳益田路` / `中信证券杭州延安路` → 一线游资
-- `华泰证券成都南一环路` / `长城证券仙桃钱沟路` → 核按钮
-- `东方财富证券拉萨团结路` / `东方财富证券拉萨东环路` → 散户
+**统一席位库标签体系** (`seat_library.py`):
+
+| 标签类别 | 函数 | 代表席位 |
+|---------|------|---------|
+| 高溢价游资 | `is_premium_seat()` | 相城大道、大连黄河路、南京汉中路 |
+| 机构/北向 | `is_institutional_seat()` | 机构专用、沪股通、深股通 |
+| 核按钮 | `is_knock_seat()` | 长城仙桃钱沟路、华泰成都南一环路 |
+| 散户 | `is_scatter_seat()` | 东方财富拉萨系列、同花顺分公司 |
+| 量化 | `is_quant_seat()` | 华鑫上海分公司、中金上海分公司 |
+| 一线游资 | `match_seat_tag()` | 华泰深圳益田路、中信杭州延安路等 |
+
+`seat_library.py` 是 `lhb_service`、`risk_breakdown_service`、`dragon_leader/lhb_alpha` 的共用席位判断底层。
 
 **游资别名匹配**: 调用 `hm_list` 接口建立营业部→游资名称反向映射，精确+子串双匹配
 
@@ -236,22 +295,103 @@ text = title + content
 
 **7大维度**（总分100分，纯规则计算，无AI）:
 
-| 维度 | 权重 | 数据源 | 所需积分 |
+| 维度 | 满分 | 数据源 | 所需积分 |
 |------|------|--------|---------|
-| 行情风险 | 4分 | Tushare `daily_basic(turnover_rate)` + `daily(high/low/pre_close)` — 昨日数据 | 2000 |
-| 筹码风险 | 18分 | Tushare `cyq_perf(winner_rate)` + `rise_10d_pct` | 5000 |
-| 公告风险 | 25分 | `integrated_news_service` 新闻关键词匹配（减持/立案/亏损等） | 0 |
-| 资金风险 | 20分 | Tushare `moneyflow(net_mf_amount)` | 2000 |
-| 舆情风险 | 10分 | `SentimentAnalyzer` 利空新闻计数 | 0 |
-| 龙虎风险 | 13分 | `lhb_service(risk_tips/action_tag)` | 已有 |
-| 行业风险 | 10分 | Tushare `ths_daily(板块行情)` | 6000 |
+| 市场环境 | 10 | Tushare `daily_basic(turnover_rate)` + `daily(high/low/pre_close)` — 昨日数据 | 2000 |
+| 筹码压力 | 14 | Tushare `cyq_perf(winner_rate)` + `rise_10d_pct` | 5000 |
+| 舆情与公告 | 18 | `integrated_news_service` 新闻关键词匹配（减持/立案/亏损等） | 0 |
+| 个股资金 | 14 | Tushare `moneyflow(net_mf_amount)` | 2000 |
+| 龙虎风险 | 10 | `lhb_service(risk_tips/action_tag)` + 席位净买卖方向判定 | 已有 |
+| 板块与题材风险 | 18 | Tushare `ths_daily(板块行情)` + 东财板块上下文 | 6000 |
+| 技术结构 | 16 | 炸板/竞价低预期等技术面风险 | 已有 |
+
+**龙虎风险增强**: 席位判定现在考虑净买方向：
+- 高溢价席位净买入 → 风险减分（进入强势依据）
+- 高溢价席位净卖出 → 风险加分
+- 核按钮/量化/散户净买入 → 风险减分（进入强势依据）
+- 核按钮/量化/散户净卖出 → 风险加分
+
+**数据库新增字段**（v5.2）:
+- `sector_context`: 东财板块上下文(JSON) — 主线板块名+涨跌+资金+涨停家数+强度
+- `lhb_strength_evidence`: 龙虎榜强势席位证据(JSON)
+- `lhb_risk_evidence`: 龙虎榜风险席位证据(JSON)
+- `strength_evidence`: 用户可见强势依据(JSON)
+- `risk_evidence`: 用户可见风险依据(JSON)
 
 **等级判定**:
 ```
 ≤20 低 / ≤40 中 / ≤70 高 / >70 极高
 ```
 
-### 13. 代码规范
+**API支持双模式**:
+- `strategy_type=normal`（默认）: 普通7维度风险模型
+- `strategy_type=dragon_leader`: 龙头战法评分模型
+
+### 13. 龙头战法评分开发规范
+
+**模块位置**
+- 核心服务: `backend/services/dragon_leader/`
+- 数据采集: `dragon_leader/data/` (stock/market/theme/fundamental/intraday)
+- 评分器: `dragon_leader/scorer/` (leader_scorer/retreat_scorer/announcement_alpha)
+- 龙虎榜Alpha: `dragon_leader/lhb_alpha.py`
+- 输出组装: `dragon_leader/output.py`
+- 数据模型: `backend/models/stock_risk.py::DragonLeaderScore`
+- API接入: `backend/api/stock_detail.py::get_stock_risk(strategy_type="dragon_leader")`
+
+**三核心分数**:
+| 分数 | 满分 | 构成 |
+|------|------|------|
+| 龙头强度 | 100 | 龙头地位25+题材强度20+情绪周期15+板块梯队15+承接强度10+竞价分时10+龙虎榜加成5 |
+| 退潮风险 | 100 | 龙头地位动摇20+情绪退潮20+板块梯队断裂15+承接失败15+筹码兑现10+竞价低预期10+公告监管10 |
+| 综合健康度 | 100 | 龙头强度×0.6 + 退潮风险×(-0.3) + 公告Alpha×0.5 + 龙虎榜Alpha×0.5 + 基准分20 |
+
+**Alpha调整**:
+- 公告Alpha: [-20, +20] — 使用 `news_sentiment` V2引擎分析利好/利空
+- 龙虎榜Alpha: [-20, +20] — 使用 `seat_library` 统一席位库判断买卖方向
+
+**等级体系**:
+- 龙头等级: 极强龙头(≥85) / 强势龙头(≥70) / 疑似龙头(≥55) / 跟风强势股(≥40) / 非龙头
+- 周期阶段: 主升期 / 分歧期 / 退潮期 / 混沌期 / 震荡期
+- 健康等级: 龙头健康(≥80) / 强势可观察(≥65) / 分歧加大(≥50) / 退潮预警(≥35) / 回避
+
+**权重配置**: `dragon_leader/config.yaml`，不存在时使用 `DRAGON_LEADER_WEIGHTS` 默认值
+
+**缓存策略**: 优先从 `dragon_leader_score` 表读DB缓存，传 `force_refresh=true` 强制重算。非强制刷新时直接返回缓存结果。
+
+### 14. 东财板块动态别名开发规范
+
+**模块位置**
+- 核心服务: `backend/services/dc_board_alias_service.py`
+- 板块服务: `backend/services/dc_board_service.py`
+- 数据模型: `backend/models/board.py` (DcBoardAlias/DcBoardAliasObservation/DcBoardAliasSyncState)
+- 生成脚本: `scripts/generate_dc_board_aliases.py`
+
+**定位**: 每个交易日从涨停池 `limit_list_ths` 抓取涨停标签(`lu_desc`)，匹配东财板块词典，自动建立板块别名映射。
+
+**核心流程**:
+```
+1. fetch_dc_boards → 获取东财板块词典
+2. limit_list_ths(trade_date, limit_type="涨停池") → 获取涨停标签
+3. split_lu_desc_tags → 拆分标签（按+号切分）
+4. score_tag_board_match → 标签与板块名称模糊匹配+语义相似度评分
+5. 写入 dc_board_alias_observation（单日命中明细，唯一键去重）
+6. 汇总 dc_board_alias → 更新命中次数/股票数/置信度
+7. auto_approved(≥阈值) / pending_review(<阈值)
+8. 清除 dc_board_service 缓存，下次读取即生效
+```
+
+**别名审核状态**:
+- `auto_approved`: 自动批准（置信度≥阈值）
+- `pending_review`: 待人工审核
+- `manual`: 人工确认
+- `reviewed`: 已审核
+- `rejected`: 已拒绝（is_active=False）
+
+**启动时同步**: `main.py::lifespan` 中，启动时自动同步最新交易日数据，盘后(15:30后)标记 finalized
+
+**运行期生效**: `DcBoardService._get_board_aliases()` 合并手写别名(`MANUAL_BOARD_ALIASES`)和动态别名(`DcBoardAliasService.get_active_aliases()`)
+
+### 15. 代码规范
 
 **Python 代码规范**
 - **Style Guide**: PEP 8
@@ -287,7 +427,7 @@ text = title + content
 
 ## 常见问题与解决方案
 
-### 14. 故障排查指南
+### 16. 故障排查指南
 
 **Q1: MCP接口返回0条记录?**
 ```bash
@@ -312,18 +452,20 @@ pytest tests/backend/unit/ -v
 检查 Tushare `top_list` / `top_inst` 接口的积分是否充足（至少2000/5000积分）。检查返回值中是否有 `numpy.float64` 等不可JSON序列化的类型（已通过 `_pyfloat()` + `_clean_nan()` 处理，如有问题查看 `_build_seat_tags_list` 中的数据转换）。
 
 **Q6: 新闻情感分析不准?**
-检查 `sentiment_analyzer.py` 中的关键词库是否覆盖了相关场景。情感分析在查询时实时计算，修改规则后刷新即可生效，无需回填数据。
+- V1: 检查 `sentiment_analyzer.py` 中的关键词库是否覆盖了相关场景。
+- V2: 检查 `news_sentiment/event_classifier.py` 事件分类是否正确，以及 `news_scope.py` 是否正确区分单股/多股新闻。
+- 两套引擎规则更新后立即生效，无需回填数据。
 
 **Q7: 龙虎榜缓存不生效?**
 首次调 Tushare API 取数成功后自动写入 `stock_lhb` 表，后续请求优先读 DB。如需强制刷新，传 `force_refresh=true` 参数。
 
 **Q8: 风险拆解得分异常?**
 检查各维度的输入数据是否完整：
-- 行情风险：需 `daily_basic` 和 `daily` 接口权限
-- 筹码风险：需 `cyq_perf` 接口（5000积分）
-- 资金风险：需 `moneyflow` 接口（2000积分）
-- 行业风险：需 `ths_daily` 接口（6000积分）
-- 公告/舆情/龙虎：复用已有模块
+- 市场环境：需 `daily_basic` 和 `daily` 接口权限
+- 筹码压力：需 `cyq_perf` 接口（5000积分）
+- 个股资金：需 `moneyflow` 接口（2000积分）
+- 板块与题材风险：需 `ths_daily` 接口（6000积分）+ 东财板块数据
+- 公告/龙虎：复用已有模块
 
 **Q9: 龙虎榜买入/卖出金额为0?**
 Tushare `top_inst` 接口可能需要5000积分，积分不足时返回空数据。此时系统会降级使用 `top_list` 的汇总数据。
@@ -331,11 +473,21 @@ Tushare `top_inst` 接口可能需要5000积分，积分不足时返回空数据
 **Q10: 游资别名不显示?**
 需要调用 Tushare `hm_list` 接口（5000积分）建立营业部→游资映射。首次调用后缓存，重启服务后重新加载。
 
+**Q11: 板块动态别名不准?**
+- 检查 `dc_board_alias` 表 `review_status` 字段，`pending_review` 状态的别名不会在线上生效
+- 置信度阈值见 `scripts/generate_dc_board_aliases.py` 中的 `AUTO_SCORE_THRESHOLD`
+- 需要手动批准可改为 `manual` 或 `reviewed` 状态
+
+**Q12: 龙头战法评分返回空?**
+- 检查 `dragon_leader_score` 表中是否有缓存数据
+- 确认个股基本信息（stock context）能正常获取
+- 消息面和龙虎榜为可选数据源，缺失时不影响主评分
+
 ---
 
 ## 开发工作流
 
-### 15. 开发流程
+### 17. 开发流程
 
 **1. 环境准备**
 - 后端: `pip install -r requirements.txt`
@@ -366,13 +518,15 @@ fix(ai): 修复AI输出验证逻辑
 feat(lhb): 实现龙虎榜模块
 feat(sentiment): 实现新闻情感分析引擎
 feat(risk): 实现风险拆解模块
+feat(dragon): 实现龙头战法评分系统
+feat(board): 实现东财板块动态别名
 ```
 
 ---
 
 ## 性能与安全
 
-### 16. 性能规范
+### 18. 性能规范
 
 **API 性能**
 - **Response Time**: 选股 API < 30 秒
@@ -390,9 +544,9 @@ feat(risk): 实现风险拆解模块
 - 超时设置: DeepSeek API 30秒超时
 
 **情感分析性能**
-- 纯规则引擎，无AI依赖
-- 关键词匹配 + 正则，单条新闻 < 1ms
-- 在新闻查询时实时计算，不影响预加载速度
+- V1 纯规则引擎，关键词匹配 + 正则，单条新闻 < 1ms
+- V2 事件驱动引擎，多事件合并+确定性因子，单条新闻 < 5ms
+- 均在查询时实时计算，不影响预加载速度
 
 **龙虎榜性能**
 - DB缓存优先：首次API拉取后写入 `stock_lhb` 表，后续读DB ~20ms
@@ -403,7 +557,16 @@ feat(risk): 实现风险拆解模块
 - 7维度并行数据采集，单只股票 < 2秒
 - 预加载：选股完成后后台批量计算，不阻塞选股流程
 
-### 17. 安全规范
+**龙头战法性能**
+- 数据采集+评分计算 < 5秒
+- DB缓存优先，强制刷新才重新计算
+- 消息面和龙虎榜并行采集
+
+**板块别名同步**
+- 启动时自动同步最新交易日，< 10秒
+- 运行期别名读取为纯内存操作，无额外延迟
+
+### 19. 安全规范
 
 **敏感信息管理**
 - **Environment Variables**: 使用 `.env` 文件 (不提交到 Git)
@@ -424,7 +587,7 @@ feat(risk): 实现风险拆解模块
 
 ## 监控与维护
 
-### 18. 监控指标
+### 20. 监控指标
 
 **Prometheus 指标**:
 - `http_requests_total` (Counter)
@@ -440,10 +603,20 @@ feat(risk): 实现风险拆解模块
 - 游资 HM_LIST 缓存命中率
 
 **情感分析监控**:
-- 各情感类别分布（positive/negative/neutral 比例）
-- 情感分析平均耗时
+- V1: 各情感类别分布（positive/negative/neutral 比例）
+- V2: 事件类型分布、确定性因子分布、多股新闻占比
 
-### 19. 日志规范
+**龙头战法监控**:
+- `dragon_leader_score` 表数据量
+- 龙头等级分布（极强龙头/强势龙头/疑似龙头/非龙头）
+- 消息面/龙虎榜Alpha覆盖比例
+
+**板块别名监控**:
+- `dc_board_alias` 表别名数
+- auto_approved vs pending_review 比例
+- `dc_board_alias_observation` 日增长量
+
+### 21. 日志规范
 
 **双格式输出**:
 - `logs/xuangu.json` - JSON格式 (适合日志聚合工具)
@@ -463,14 +636,24 @@ feat(risk): 实现风险拆解模块
 - 记录预加载执行情况
 
 **情感分析日志**:
-- 记录匹配的关键词和权重
+- V1: 记录匹配的关键词和权重
+- V2: 记录事件类型、事实抽取结果、确定性因子
 - 记录最终判定结果
+
+**龙头战法日志**:
+- 记录数据采集耗时（stock/market/theme/fundamental/intraday）
+- 记录评分计算耗时
+- 记录DB缓存命中/写入
+
+**板块别名日志**:
+- 记录每日同步状态（fetch/save/insert counts）
+- 记录自动批准与待审核数量
 
 ---
 
 ## 部署与运维
 
-### 20. 部署架构
+### 22. 部署架构
 
 **直接部署 (Supervisor + Nginx)**
 
@@ -541,6 +724,6 @@ AI_TIMEOUT=30
 
 **这些指南有效的标志：** 差异中不必要的修改更少了，因过度复杂而重写的情况更少了，澄清问题出现在实现之前而不是出错之后。
 
-**Last Updated**: 2026-04-30  
-**Maintainer**: AI Assistant  
-**Version**: 7.0
+**Last Updated**: 2026-05-08
+**Maintainer**: AI Assistant
+**Version**: 8.0

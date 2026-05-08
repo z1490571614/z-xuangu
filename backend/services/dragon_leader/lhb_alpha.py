@@ -7,12 +7,34 @@
 import logging
 from typing import Dict, Any, List, Optional
 
-from backend.services.seat_library import (
-    is_premium_seat, is_institutional_seat,
-    is_knock_seat, is_scatter_seat, is_quant_seat,
-)
+from backend.services.lhb_score_engine import analyze_lhb_seat_effects
 
 logger = logging.getLogger(__name__)
+
+
+def _premium_alpha_value(seat: Dict[str, Any]) -> int:
+    if seat.get("detail_type") in ("机构", "北向"):
+        return 5
+    return 8
+
+
+def _premium_alpha_label(seat: Dict[str, Any]) -> str:
+    if seat.get("detail_type") == "机构":
+        return "机构"
+    if seat.get("detail_type") == "北向":
+        return "北向"
+    return "高溢价游资"
+
+
+def _dump_alpha_value(seat: Dict[str, Any]) -> int:
+    tag = seat.get("tag")
+    if tag == "核按钮":
+        return 12
+    if tag == "量化":
+        return 6
+    if tag == "散户":
+        return 4
+    return 0
 
 
 def calculate_lhb_alpha(lhb_data: Optional[Dict]) -> Dict[str, Any]:
@@ -46,32 +68,32 @@ def calculate_lhb_alpha(lhb_data: Optional[Dict]) -> Dict[str, Any]:
     penalty_score = 0
     bonus_tips: List[str] = []
     penalty_tips: List[str] = []
-    buy_list = lhb_data.get("buy_top5", [])
-    sell_list = lhb_data.get("sell_top5", [])
+    effects = analyze_lhb_seat_effects(lhb_data)
 
-    # ---- 买入席位加分 ----
-    for seat in buy_list:
-        exalter = seat.get("exalter", "")
-        # 使用 seat_library 已有判断函数
-        if is_premium_seat(exalter):
-            bonus_score += 8
-            bonus_tips.append(f"高溢价游资买入({exalter[:12]}...)")
-        elif is_institutional_seat(exalter):
-            bonus_score += 5
-            bonus_tips.append(f"机构买入({exalter[:12]}...)")
+    # ---- 席位方向评分：统一使用净买入方向，不再只看买榜/卖榜位置 ----
+    for seat in effects["premium_net_buy"]:
+        value = _premium_alpha_value(seat)
+        label = _premium_alpha_label(seat)
+        bonus_score += value
+        bonus_tips.append(f"{label}净买入({seat['exalter'][:12]}...)")
 
-    # ---- 卖出席位扣分 ----
-    for seat in sell_list:
-        exalter = seat.get("exalter", "")
-        if is_knock_seat(exalter):
-            penalty_score -= 12
-            penalty_tips.append(f"核按钮席位卖出({exalter[:12]}...)")
-        elif is_scatter_seat(exalter):
-            penalty_score -= 4
-            penalty_tips.append(f"散户席位卖出({exalter[:12]}...)")
-        elif is_quant_seat(exalter):
-            penalty_score -= 6
-            penalty_tips.append(f"量化席位卖出({exalter[:12]}...)")
+    for seat in effects["premium_net_sell"]:
+        value = _premium_alpha_value(seat)
+        label = _premium_alpha_label(seat)
+        penalty_score -= value
+        penalty_tips.append(f"{label}净卖出({seat['exalter'][:12]}...)")
+
+    for seat in effects["dump_net_buy"]:
+        value = _dump_alpha_value(seat)
+        if value:
+            penalty_score -= value
+            penalty_tips.append(f"{seat['tag']}席位净买入({seat['exalter'][:12]}...)")
+
+    for seat in effects["dump_net_sell"]:
+        value = _dump_alpha_value(seat)
+        if value:
+            bonus_score += value
+            bonus_tips.append(f"{seat['tag']}席位净卖出({seat['exalter'][:12]}...)")
 
     # ---- 买榜结构判断 ----
     net_amount = lhb_data.get("net_amount", 0) or 0
@@ -95,13 +117,11 @@ def calculate_lhb_alpha(lhb_data: Optional[Dict]) -> Dict[str, Any]:
         penalty_tips.append("净卖出超5000万")
 
     # ---- 散户集中买入（需警惕次日抛压） ----
-    if buy_list and len(buy_list) >= 3:
-        scatter_count = sum(1 for s in buy_list[:3] if is_scatter_seat(s.get("exalter", "")))
-        premium_count = sum(1 for s in buy_list[:3] if is_premium_seat(s.get("exalter", "")))
-        if scatter_count >= 2:
+    if effects["all_seats"]:
+        if effects["buy_top3_scatter_count"] >= 2:
             penalty_score -= 3
             penalty_tips.append("散户集中买入（需警惕次日抛压）")
-        elif premium_count >= 2:
+        elif effects["buy_top3_premium_count"] >= 2:
             bonus_score += 3
             bonus_tips.append("多路高溢价游资合力")
 

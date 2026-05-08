@@ -3,10 +3,9 @@
 新增技术面维度(stk_factor_pro)，修复行情/筹码/行业匹配问题
 """
 import json
-import math
 import logging
 import re
-from typing import Dict, Any, Optional, List, Tuple, Set
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
 
 from backend.database import SessionLocal
@@ -732,49 +731,54 @@ class RiskBreakdownService:
         self._last_lhb_risk_evidence = []
 
         from backend.services.lhb_service import analyze_lhb
-        from backend.services.seat_library import get_seat_risk_score, match_seat_tag
+        from backend.services.lhb_score_engine import analyze_lhb_seat_effects
         try:
             lhb_data = analyze_lhb(ts_code, trade_date, force_refresh=False)
             if lhb_data.get("data_status") == "available":
                 action_tag = lhb_data.get("action_tag", "")
                 net_amount = lhb_data.get("net_amount", 0) or 0
-                buy_top5 = lhb_data.get("buy_top5", [])
-                sell_top5 = lhb_data.get("sell_top5", [])
+                effects = analyze_lhb_seat_effects(lhb_data)
 
-                premium_buy_seats = [
-                    seat.get("exalter", "")
-                    for seat in buy_top5
-                    if match_seat_tag(seat.get("exalter", ""))[0] == "高溢价"
-                ]
-                dump_sell_seats = [
-                    seat.get("exalter", "")
-                    for seat in sell_top5
-                    if match_seat_tag(seat.get("exalter", ""))[0] in ("核按钮", "量化", "散户")
-                ]
+                premium_buy_seats = [s["exalter"] for s in effects["premium_net_buy"]]
+                premium_sell_seats = [s["exalter"] for s in effects["premium_net_sell"]]
+                dump_buy_seats = [s["exalter"] for s in effects["dump_net_buy"]]
+                dump_sell_seats = [s["exalter"] for s in effects["dump_net_sell"]]
+
+                score -= 2 * len(premium_buy_seats)
+                score += 3 * len(premium_sell_seats)
+                score -= 2 * len(dump_buy_seats)
+                for seat in effects["dump_net_sell"]:
+                    score += 5 if seat.get("tag") == "核按钮" else 3
+
                 if premium_buy_seats:
                     self._last_lhb_strength_evidence.append({
-                        "type": "premium_buy",
-                        "label": "高溢价席位买入",
+                        "type": "premium_net_buy",
+                        "label": "高溢价席位净买入",
                         "seats": premium_buy_seats[:5],
                         "score_effect": "抵扣龙虎风险，进入强势依据",
                     })
+                if dump_buy_seats:
+                    self._last_lhb_strength_evidence.append({
+                        "type": "dump_net_buy",
+                        "label": "砸盘席位净买入",
+                        "seats": dump_buy_seats[:5],
+                        "score_effect": "抵扣龙虎风险，进入强势依据",
+                    })
+                if premium_sell_seats:
+                    self._last_lhb_risk_evidence.append({
+                        "type": "premium_net_sell",
+                        "label": "高溢价席位净卖出",
+                        "seats": premium_sell_seats[:5],
+                        "score_effect": "增加龙虎风险",
+                    })
+                    tips.append("高溢价席位净卖出")
                 if dump_sell_seats:
                     self._last_lhb_risk_evidence.append({
-                        "type": "dump_sell",
-                        "label": "砸盘席位卖出",
+                        "type": "dump_net_sell",
+                        "label": "砸盘席位净卖出",
                         "seats": dump_sell_seats[:5],
                         "score_effect": "增加龙虎风险",
                     })
-
-                # 席位标签风险评分（独立计算，用于评分）
-                for seat_list, label in [(buy_top5, "买入"), (sell_top5, "卖出")]:
-                    for seat in seat_list:
-                        exalter = seat.get("exalter", "")
-                        seat_risk = get_seat_risk_score(exalter)
-                        if seat_risk > 0:
-                            score += seat_risk
-                        elif seat_risk < 0:
-                            score += seat_risk
 
                 # 核按钮提示使用 lhb_service.risk_tips（与龙虎榜面板共享数据源）
                 lhb_risk_tips = lhb_data.get("risk_tips", [])
@@ -1058,6 +1062,11 @@ class RiskBreakdownService:
                 "sector_tips": json.dumps(data["sector_tips"], ensure_ascii=False),
                 "sentiment_tips": json.dumps(data.get("technical_tips", []), ensure_ascii=False),
                 "news_tips": json.dumps(data["news_tips"], ensure_ascii=False),
+                "sector_context": json.dumps(data.get("sector_context", {}), ensure_ascii=False),
+                "lhb_strength_evidence": json.dumps(data.get("lhb_strength_evidence", []), ensure_ascii=False),
+                "lhb_risk_evidence": json.dumps(data.get("lhb_risk_evidence", []), ensure_ascii=False),
+                "strength_evidence": json.dumps(data.get("strength_evidence", []), ensure_ascii=False),
+                "risk_evidence": json.dumps(data.get("risk_evidence", []), ensure_ascii=False),
                 "risk_summary": data.get("risk_summary", ""),
                 "warning_tip": data.get("warning_tip", ""),
             }
@@ -1146,11 +1155,11 @@ class RiskBreakdownService:
             "lhb_tips": load_json(record.lhb_tips),
             "sector_tips": load_json(record.sector_tips),
             "technical_tips": technical_tips,
-            "sector_context": {},
-            "lhb_strength_evidence": [],
-            "lhb_risk_evidence": [],
-            "strength_evidence": [],
-            "risk_evidence": [],
+            "sector_context": load_json(getattr(record, "sector_context", None)) or {},
+            "lhb_strength_evidence": load_json(getattr(record, "lhb_strength_evidence", None)),
+            "lhb_risk_evidence": load_json(getattr(record, "lhb_risk_evidence", None)),
+            "strength_evidence": load_json(getattr(record, "strength_evidence", None)),
+            "risk_evidence": load_json(getattr(record, "risk_evidence", None)),
         }
 
     def _fallback_empty(self, trade_date: str) -> Dict:

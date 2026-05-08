@@ -374,6 +374,7 @@ class ThemeContext:
         hot_boards = self.get_hot_boards(trade_date)
         normalized_hint_boards = self._normalized_hint_boards(hints, hot_boards)
         hint_matched = []
+        reference_matched = []
         membership_matched = []
 
         for board in hot_boards:
@@ -382,8 +383,12 @@ class ThemeContext:
             match_score, match_reasons = self._theme_match_score(board, hints)
             if match_reasons:
                 item = dict(board)
-                item["matched_from"] = "hot_board_hint"
-                hint_matched.append(item)
+                if self._is_semantic_reference_match(board, match_reasons):
+                    item["matched_from"] = "semantic_reference_board"
+                    reference_matched.append(item)
+                else:
+                    item["matched_from"] = "hot_board_hint"
+                    hint_matched.append(item)
             elif name in concept_names or code in concept_codes:
                 item = dict(board)
                 item["matched_from"] = "stock_membership"
@@ -415,8 +420,18 @@ class ThemeContext:
             board["match_score"] = match_score + int(board.get("_source_score_bonus", 0) or 0)
             board["match_reasons"] = list(board.get("_dict_match_reasons", [])) + match_reasons
 
+        for board in reference_matched:
+            match_score, match_reasons = self._theme_match_score(board, hints)
+            board["match_score"] = match_score
+            board["match_reasons"] = match_reasons
+
         matched_sorted = sorted(
             matched,
+            key=lambda b: (b.get("match_score", 0), -int(b.get("rank", 999) or 999)),
+            reverse=True,
+        )
+        reference_sorted = sorted(
+            reference_matched,
             key=lambda b: (b.get("match_score", 0), -int(b.get("rank", 999) or 999)),
             reverse=True,
         )
@@ -429,10 +444,20 @@ class ThemeContext:
             "best_name": best_name,
             "primary_board": best_board,
             "hot_boards": matched_sorted[:5],
+            "reference_hot_boards": reference_sorted[:5],
             "board_count": len(matched),
             "all_concepts": concepts[:10],  # 最多返回10个
             "match_hints": hints,
         }
+
+    def _is_semantic_reference_match(self, board: Dict[str, Any], match_reasons: List[str]) -> bool:
+        """识别由泛语义扩展来的热点参考，避免把参考热点当成个股所属题材。"""
+        if not match_reasons:
+            return False
+        if any("语义命中" not in reason for reason in match_reasons):
+            return False
+        theme = self._theme_resolver.resolve_one(str(board.get("name", "") or ""))
+        return bool(theme.get("is_generic"))
 
     # ========== KPL 榜单 ==========
 

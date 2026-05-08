@@ -71,5 +71,22 @@ def score_abnormal_movement(text: str) -> float:
     return 0.0
 
 
+def score_risk_warning(text: str) -> float:
+    score = 0.0
+    if "风险提示公告" in text or "股票交易风险提示" in text or "交易风险提示" in text:
+        score -= 0.6
+    if "二级市场交易风险" in text or "交易风险" in text:
+        score -= 0.3
+    if "市净率远高于行业平均" in text or "远高于行业平均水平" in text:
+        score -= 0.3
+    if "业绩风险" in text:
+        score -= 0.3
+    if "股票价格短期波动较大" in text or "股价短期波动较大" in text:
+        score -= 0.2
+    if "审慎投资" in text:
+        score -= 0.1
+    return max(-1.4, score)
+
+
 def score_process(text: str) -> float:
     return 0.0

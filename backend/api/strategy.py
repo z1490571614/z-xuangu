@@ -14,14 +14,13 @@
 注意：静态路由必须在动态路由之前定义，否则会被错误匹配！
 """
 import logging
-from typing import Optional, List
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import StrategyTemplate
 from backend.services.strategy_service import StrategyTemplateService
 
 logger = logging.getLogger(__name__)

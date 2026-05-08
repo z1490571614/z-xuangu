@@ -16,6 +16,7 @@ os.environ.setdefault("ALLOWED_ORIGINS", "http://testserver")
 os.environ.setdefault("LOG_DIR", "logs")
 
 from backend.database import engine, Base, SessionLocal
+import backend.models  # noqa: F401 - register all ORM models before create_all
 from backend.main import app
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,7 @@ from fastapi.testclient import TestClient
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_db():
     """测试数据库初始化"""
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)

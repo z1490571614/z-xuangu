@@ -36,6 +36,11 @@ class StockRiskBreakdown(Base):
     lhb_tips = Column(Text)
     sector_tips = Column(Text)
     news_tips = Column(Text)          # 新增：舆情&公告明细
+    sector_context = Column(Text)     # 新增：东财板块上下文(JSON)
+    lhb_strength_evidence = Column(Text)  # 新增：龙虎榜强势席位证据(JSON)
+    lhb_risk_evidence = Column(Text)      # 新增：龙虎榜风险席位证据(JSON)
+    strength_evidence = Column(Text)      # 新增：用户可见强势依据(JSON)
+    risk_evidence = Column(Text)          # 新增：用户可见风险依据(JSON)
 
     # 风险标签 + 高危预警
     risk_summary = Column(String(255))

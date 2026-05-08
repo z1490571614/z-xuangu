@@ -15,7 +15,15 @@ from backend.models.stock_news import StockNews
 from backend.models.stock_lhb import StockLhb
 from backend.models.stock_risk import StockRiskBreakdown
 from backend.models.stock_ths_board import ThsBoardIndex, StockThsBoardMember
-from backend.models.board import BoardIndex, StockBoardMember, BoardDailySnapshot, BoardStrengthSnapshot
+from backend.models.board import (
+    BoardIndex,
+    StockBoardMember,
+    BoardDailySnapshot,
+    BoardStrengthSnapshot,
+    DcBoardAlias,
+    DcBoardAliasObservation,
+    DcBoardAliasSyncState,
+)
 from backend.auth.models import User
 
 __all__ = [
@@ -42,5 +50,8 @@ __all__ = [
     "StockBoardMember",
     "BoardDailySnapshot",
     "BoardStrengthSnapshot",
+    "DcBoardAlias",
+    "DcBoardAliasObservation",
+    "DcBoardAliasSyncState",
     "User",
 ]

@@ -10,9 +10,6 @@ from backend.database import get_db
 from backend.schemas import (
     ApiResponse,
     SelectRequest,
-    SelectionResult,
-    SelectionRecordResponse,
-    StockInfo,
 )
 from backend.services.stock_selector import select_stocks
 from backend.models import SelectionRecord, SelectedStock

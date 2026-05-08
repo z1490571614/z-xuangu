@@ -152,6 +152,31 @@
         </div>
       </div>
 
+      <div v-if="sectorContext.primary_board" class="context-section">
+        <div class="context-title">主线板块</div>
+        <div class="context-grid">
+          <span>{{ sectorContext.primary_board.name }}</span>
+          <span v-if="sectorContext.board_pct_chg !== undefined">涨跌 {{ formatPct(sectorContext.board_pct_chg) }}</span>
+          <span v-if="sectorContext.money_net_amount_yi !== undefined">资金 {{ formatMoney(sectorContext.money_net_amount_yi) }}</span>
+          <span v-if="sectorContext.limit_up_count !== undefined">涨停 {{ sectorContext.limit_up_count }} 家</span>
+          <span v-if="sectorContext.strength_score !== undefined">强度 {{ formatNumber(sectorContext.strength_score) }}</span>
+        </div>
+      </div>
+
+      <div v-if="strengthEvidence.length" class="evidence-section">
+        <div class="section-title positive">强势依据</div>
+        <div class="section-body">
+          <div v-for="(t, i) in strengthEvidence" :key="'s'+i" class="tip-item positive">● {{ t }}</div>
+        </div>
+      </div>
+
+      <div v-if="riskEvidence.length" class="evidence-section">
+        <div class="section-title negative">风险依据</div>
+        <div class="section-body">
+          <div v-for="(t, i) in riskEvidence" :key="'r'+i" class="tip-item negative">● {{ t }}</div>
+        </div>
+      </div>
+
       <div v-if="riskData.warning_tip" class="warning-bar">
         ⚠️ 高危预警：{{ riskData.warning_tip }}
       </div>
@@ -229,15 +254,37 @@ const statusText = computed(() => {
 const riskItems = computed(() => {
   const d = props.riskData || {}
   return [
-    { name: '行情风险', score: d.market_score || 0, max: 12, tips: d.market_tips || [] },
-    { name: '筹码风险', score: d.chip_score || 0, max: 15, tips: d.chip_tips || [] },
-    { name: '舆情&公告综合', score: d.news_score || 0, max: 20, tips: d.news_tips || [] },
-    { name: '资金风险', score: d.capital_score || 0, max: 15, tips: d.capital_tips || [] },
+    { name: '市场环境', score: d.market_score || 0, max: 10, tips: d.market_tips || [] },
+    { name: '筹码压力', score: d.chip_score || 0, max: 14, tips: d.chip_tips || [] },
+    { name: '舆情与公告', score: d.news_score || 0, max: 18, tips: d.news_tips || [] },
+    { name: '个股资金', score: d.capital_score || 0, max: 14, tips: d.capital_tips || [] },
     { name: '龙虎风险', score: d.lhb_score || 0, max: 10, tips: d.lhb_tips || [] },
-    { name: '行业风险', score: d.sector_score || 0, max: 10, tips: d.sector_tips || [] },
-    { name: '技术面风险', score: d.technical_score || 0, max: 18, tips: d.technical_tips || [] },
+    { name: '板块与题材风险', score: d.sector_score || 0, max: 18, tips: d.sector_tips || [] },
+    { name: '技术结构', score: d.technical_score || 0, max: 16, tips: d.technical_tips || [] },
   ]
 })
+
+const sectorContext = computed(() => props.riskData?.sector_context || {})
+const strengthEvidence = computed(() => props.riskData?.strength_evidence || [])
+const riskEvidence = computed(() => props.riskData?.risk_evidence || [])
+
+function formatPct(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '--'
+  return `${n > 0 ? '+' : ''}${n.toFixed(1)}%`
+}
+
+function formatMoney(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '--'
+  return `${n > 0 ? '+' : ''}${n.toFixed(1)}亿`
+}
+
+function formatNumber(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '--'
+  return n.toFixed(0)
+}
 
 function getScoreCls(score, max) {
   const pct = max > 0 ? score / max : 0
@@ -347,6 +394,12 @@ function getScoreCls(score, max) {
 .item-tips { font-size: 12px; color: #555; line-height: 1.6; }
 .tip { margin-bottom: 2px; }
 .no-risk { color: #bbb; font-size: 11px; }
+
+.context-section { margin: 10px 0 12px; padding: 10px 12px; background: #f7fbff; border-radius: 8px; border-left: 3px solid #1890ff; }
+.context-title { font-size: 12px; color: #1890ff; font-weight: 700; margin-bottom: 6px; }
+.context-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.context-grid span { font-size: 11px; color: #4a5a68; background: #fff; border: 1px solid #e6f4ff; border-radius: 4px; padding: 3px 7px; }
+.evidence-section { margin: 10px 0; }
 
 .warning-bar { margin-top: 12px; padding: 8px 12px; background: #fff2f0; color: #ff0000; border-radius: 6px; font-size: 12px; font-weight: 600; }
 

@@ -10,6 +10,12 @@ MARKET_OVERVIEW_WORDS = [
     "今日市场", "涨停", "跌停", "连板",
 ]
 
+ROUNDUP_TITLE_WORDS = [
+    "新闻精选", "早间新闻精选", "午间新闻精选", "晚间新闻精选",
+    "公告精选", "晚间公告精选", "要闻汇总", "资讯汇总",
+    "盘前要闻", "盘后要闻",
+]
+
 SINGLE_STOCK_WORDS = [
     "公告称", "公告", "发布公告", "披露",
     "净利润", "营业收入", "归属于上市公司股东",
@@ -22,8 +28,20 @@ def classify_news_scope(title: str, content: str, stock_name: str = "") -> dict:
     """识别新闻属于单股/多股/市场综述"""
     text = f"{title or ''}。{content or ''}"
 
+    roundup_hits = [w for w in ROUNDUP_TITLE_WORDS if w in (title or "")]
     market_hits = [w for w in MARKET_OVERVIEW_WORDS if w in text]
     single_hits = [w for w in SINGLE_STOCK_WORDS if w in text]
+    has_target_stock = bool(stock_name and stock_name in text)
+
+    if roundup_hits:
+        return {
+            "news_scope": "market_overview",
+            "reason": "roundup_news",
+            "market_hits": market_hits,
+            "single_hits": single_hits,
+            "roundup_hits": roundup_hits,
+            "has_target_stock": has_target_stock,
+        }
 
     # 多股票结构特征
     has_many_stock_like_phrases = (
@@ -31,8 +49,6 @@ def classify_news_scope(title: str, content: str, stock_name: str = "") -> dict:
         or text.count("板") >= 3
         or text.count("高开") + text.count("低开") + text.count("涨停") >= 3
     )
-
-    has_target_stock = bool(stock_name and stock_name in text)
 
     if len(market_hits) >= 2 and has_many_stock_like_phrases:
         return {

@@ -11,10 +11,16 @@ SECTOR_NAME_MAP = {
     "科创板": "科创板(科技创新)",
 }
 
+REFERENCE_BOARD_MATCHES = {"limit_cpt_list_reference", "semantic_reference_board"}
+
 
 def _fmt_sector(name: str) -> str:
     """格式化板块名称"""
     return SECTOR_NAME_MAP.get(name, name)
+
+
+def _evidence_boards(boards):
+    return [board for board in boards if board.get("matched_from") not in REFERENCE_BOARD_MATCHES]
 
 
 def calculate_leader_status(ctx: Dict) -> Dict:
@@ -112,6 +118,7 @@ def calculate_theme_strength(ctx: Dict) -> Dict:
     }
     board_count = theme_rank.get("board_count", 0)
     hot_boards = theme_rank.get("hot_boards", [])
+    evidence_boards = _evidence_boards(hot_boards)
     all_concepts = theme_rank.get("all_concepts", [])
 
     if best_name and primary_matched_from in dictionary_match_labels:
@@ -139,7 +146,7 @@ def calculate_theme_strength(ctx: Dict) -> Dict:
         score += 3
         names = []
         has_rankless_dictionary_match = False
-        for b in hot_boards[:5]:
+        for b in evidence_boards[:5]:
             if not b.get("name"):
                 continue
             rank = b.get("rank", "--")
@@ -163,7 +170,7 @@ def calculate_theme_strength(ctx: Dict) -> Dict:
     else:
         candidate_tip = ""
 
-    for board in hot_boards[:3]:
+    for board in evidence_boards[:3]:
         name = _fmt_sector(board.get("name", ""))
         up = board.get("up_nums", 0)
         days = board.get("days", 0)
@@ -241,7 +248,7 @@ def calculate_sector_ladder(ctx: Dict) -> Dict:
     tips = []
     theme = ctx.get("theme", {})
     theme_rank = theme.get("theme_rank", {})
-    hot_boards = theme_rank.get("hot_boards", [])
+    hot_boards = _evidence_boards(theme_rank.get("hot_boards", []))
 
     for board in hot_boards[:2]:
         name = _fmt_sector(board.get("name", ""))
