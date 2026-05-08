@@ -8,6 +8,7 @@ from backend.models.system_config import SystemConfig
 from backend.models.scheduled_task import ScheduledTask
 from backend.models.strategy_template import StrategyTemplate
 from backend.models.stock_feature_snapshot import StockFeatureSnapshot, StockDetailSnapshot, ModelVersion
+from backend.models.auction_backtest import StockAuctionOpen, LeaderMainT0TrainingSample
 from backend.models.scoring_v2 import StockScoreV2, StockScoreBreakdownV2, StockRiskBreakdownV2
 from backend.models.anomaly_interpretation import StockAnomalyInterpretation
 from backend.models.overview_brief import StockOverviewBrief
@@ -36,6 +37,8 @@ __all__ = [
     "StockFeatureSnapshot",
     "StockDetailSnapshot",
     "ModelVersion",
+    "StockAuctionOpen",
+    "LeaderMainT0TrainingSample",
     "StockScoreV2",
     "StockScoreBreakdownV2",
     "StockRiskBreakdownV2",

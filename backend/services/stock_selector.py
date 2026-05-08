@@ -25,7 +25,10 @@ from backend.services.data_collector import TushareDataCollector
 from backend.services.seal_rate_calculator import SealRateCalculator
 from backend.services.scoring.rule_score_service import RuleScoreService
 from backend.services.scoring.next_day_plan import NextDayPlanService
-from backend.services.model_engine.lightgbm_service import batch_predict_before_selection
+from backend.services.model_engine.lightgbm_service import (
+    batch_predict_before_selection,
+    batch_predict_leader_main_t0,
+)
 from backend.services.scoring_v2 import StockScoringV2Service, is_score_v2_enabled
 from backend.models import SelectionRecord, SelectedStock, StockFeatureSnapshot
 from backend.database import SessionLocal
@@ -604,6 +607,14 @@ class StockSelectorService:
             for s in merged:
                 s["final_score"] = round(s.get("rule_score", 0), 2)
 
+        # 龙头主升 T+0 成功率模型只做展示/排序参考，不覆盖 final_score。
+        try:
+            merged = batch_predict_leader_main_t0(merged)
+        except Exception as e:
+            logger.warning(f"龙头主升T+0模型预测失败: {e}")
+            for s in merged:
+                s["t0_limit_success_prob"] = None
+
         return merged
 
     def _build_phase1_metric_fallbacks(
@@ -769,12 +780,14 @@ class StockSelectorService:
                     # 评分字段
                     rule_score=stock.get("rule_score"),
                     model_score=stock.get("model_score"),
+                    t0_limit_success_prob=stock.get("t0_limit_success_prob"),
                     final_score=stock.get("final_score"),
                     score_level=stock.get("score_level"),
                     score_breakdown=_json.dumps(stock.get("score_breakdown", {}), ensure_ascii=False) if stock.get("score_breakdown") else None,
                     reasons="; ".join(stock.get("reasons", [])) if stock.get("reasons") else None,
                     risk_tags=_json.dumps(stock.get("risk_tags", []), ensure_ascii=False) if stock.get("risk_tags") else None,
                     next_day_plan=_json.dumps(stock.get("next_day_plan", {}), ensure_ascii=False) if stock.get("next_day_plan") else None,
+                    t0_limit_success_model_version=stock.get("t0_limit_success_prob_model_version"),
                 )
                 db.add(selected_stock)
 

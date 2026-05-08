@@ -32,7 +32,7 @@ class TushareDataCollector:
         if not self.token:
             raise ValueError("Tushare Token 未配置，请设置 TUSHARE_TOKEN 环境变量")
 
-        self._trading_calendar_cache: Optional[set] = None
+        self._trading_calendar_cache: Dict[int, set] = {}
         self._last_pro: Optional[Any] = None
 
     @property
@@ -66,8 +66,11 @@ class TushareDataCollector:
         if year is None:
             year = date.today().year
 
-        if self._trading_calendar_cache:
-            return self._trading_calendar_cache
+        if not isinstance(self._trading_calendar_cache, dict):
+            self._trading_calendar_cache = {}
+
+        if year in self._trading_calendar_cache:
+            return self._trading_calendar_cache[year]
 
         try:
             start_date = f"{year}0101"
@@ -80,8 +83,8 @@ class TushareDataCollector:
             )
 
             if df is not None and len(df) > 0:
-                self._trading_calendar_cache = set(df['cal_date'].tolist())
-                return self._trading_calendar_cache
+                self._trading_calendar_cache[year] = set(df['cal_date'].tolist())
+                return self._trading_calendar_cache[year]
         except Exception as e:
             logger.error(f"获取交易日历失败: {e}")
 
@@ -270,7 +273,7 @@ class TushareDataCollector:
         try:
             df = self.pro.daily_basic(
                 trade_date=trade_date,
-                fields='ts_code,trade_date,close,turnover_rate,volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv,circ_mv'
+                fields='ts_code,trade_date,close,turnover_rate,volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv,circ_mv,float_share'
             )
             logger.info(f"获取每日指标成功，共 {len(df)} 条记录")
             return df
@@ -392,6 +395,26 @@ class TushareDataCollector:
             return df if df is not None else pd.DataFrame()
         except Exception as e:
             logger.warning(f"获取集合竞价数据失败（可能需要更高积分）: {e}")
+            return pd.DataFrame()
+
+    def get_stk_auction_open(self, trade_date: str) -> pd.DataFrame:
+        """
+        获取开盘集合竞价数据（Tushare stk_auction_o）。
+
+        该接口用于历史回测和训练，实盘选股仍以 MCP 当日竞价字段为准。
+        """
+        try:
+            df = self.pro.stk_auction_o(
+                trade_date=trade_date,
+                fields="ts_code,trade_date,open,high,low,close,vol,amount,vwap",
+            )
+            if df is not None and len(df) > 0:
+                logger.info(f"获取开盘集合竞价数据成功，共 {len(df)} 条记录")
+                return df
+            logger.warning("获取开盘集合竞价数据返回空数据")
+            return pd.DataFrame()
+        except Exception as e:
+            logger.warning(f"获取开盘集合竞价数据失败: {e}")
             return pd.DataFrame()
 
     def get_latest_trade_date(self) -> str:

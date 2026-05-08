@@ -22,7 +22,7 @@ setup_logging(
     log_level=os.getenv("LOG_LEVEL", "INFO"),
 )
 
-from backend.api import stock, task, config, strategy, stock_detail, score_v2, anomaly, overview_brief, news_v2
+from backend.api import stock, task, config, strategy, stock_detail, score_v2, anomaly, overview_brief, news_v2, backtest
 from backend.auth import routes as auth_routes
 from backend.database import engine, Base
 from backend.models.stock_lhb import StockLhb
@@ -42,6 +42,7 @@ from backend.models import (
     StockScoreV2, StockScoreBreakdownV2, StockRiskBreakdownV2,
     StockOverviewBrief, StockAnomalyInterpretation,
     StockFeatureSnapshot, StockDetailSnapshot,
+    StockAuctionOpen, LeaderMainT0TrainingSample,
 )  # 确保 V3 表在 create_all 前注册
 from backend.models.seal_rate import StockDailyData, SealRateCache  # 确保日线/封板率表注册
 from backend.middleware.prometheus_middleware import prometheus_middleware, metrics_endpoint
@@ -56,6 +57,11 @@ async def lifespan(app: FastAPI):
     logger.info("启动选股通知系统...")
     logger.info(f"Tushare Token: {os.getenv('TUSHARE_TOKEN', 'NOT SET')[:20]}...")
     Base.metadata.create_all(bind=engine)
+    try:
+        from backend.database.schema_migrations import ensure_runtime_columns
+        ensure_runtime_columns(engine)
+    except Exception as e:
+        logger.warning(f"数据库轻量迁移失败，继续启动: {e}")
     logger.info("数据库表创建完成")
 
     # 启动时同步一次东财板块词典，运行期主题匹配只读本地库
@@ -252,6 +258,7 @@ app.include_router(score_v2.router)
 app.include_router(anomaly.router)
 app.include_router(overview_brief.router)
 app.include_router(news_v2.router)
+app.include_router(backtest.router, prefix="/api/v1")
 app.include_router(auth_routes.router)
 
 from backend.services.websocket_service import websocket_endpoint, get_connection_stats
@@ -261,14 +268,43 @@ import os as _os
 @app.get("/api/v1/model/status", tags=["模型"])
 async def model_status():
     """获取LightGBM模型状态"""
+    import json as _json
+    from backend.database import SessionLocal
+    from backend.models import ModelVersion
+
     model_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', 'models', 'active_auction_lgbm.pkl')
     exists = _os.path.exists(model_path)
+    models = {}
+    db = SessionLocal()
+    try:
+        active_versions = db.query(ModelVersion).filter(ModelVersion.is_active == 1).all()
+        for mv in active_versions:
+            try:
+                feature_cols = _json.loads(mv.feature_cols) if mv.feature_cols else []
+            except Exception:
+                feature_cols = []
+            try:
+                metrics = _json.loads(mv.model_metrics) if mv.model_metrics else {}
+            except Exception:
+                metrics = {}
+            models[mv.model_name] = {
+                "version": mv.version,
+                "model_path": mv.model_path,
+                "feature_cols": feature_cols,
+                "metrics": metrics,
+                "train_start_date": mv.train_start_date,
+                "train_end_date": mv.train_end_date,
+                "created_at": mv.created_at.isoformat() if mv.created_at else None,
+            }
+    finally:
+        db.close()
     return {
         "code": 200,
         "message": "success",
         "data": {
             "enabled": exists,
             "model_path": model_path if exists else None,
+            "models": models,
         }
     }
 

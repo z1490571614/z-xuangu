@@ -268,6 +268,8 @@ async def get_selection_detail(
                 "board_type": stock.board_type or fallback.get("board_type"),
                 "rule_score": float(stock.rule_score) if stock.rule_score else None,
                 "model_score": float(stock.model_score) if stock.model_score else None,
+                "t0_limit_success_prob": float(stock.t0_limit_success_prob) if stock.t0_limit_success_prob else None,
+                "t0_limit_success_model_version": stock.t0_limit_success_model_version,
                 "final_score": float(stock.final_score) if stock.final_score else None,
                 "score_level": stock.score_level,
                 "reasons": stock.reasons.split("; ") if stock.reasons else [],

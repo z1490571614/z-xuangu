@@ -119,6 +119,12 @@
               <th>入选原因</th>
               <th>竞昨比</th>
               <th>竞价换手率</th>
+              <th @click="sortBy('t0_limit_success_prob')" class="sortable">
+                T+0成功率
+                <span v-if="sortField === 't0_limit_success_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
               <th>触板</th>
               <th>封板</th>
               <th>封成比</th>
@@ -155,6 +161,9 @@
               </td>
               <td class="num-cell">{{ formatPct(stock.auction_ratio) }}</td>
               <td class="num-cell">{{ formatPct(stock.auction_turnover_rate) }}</td>
+              <td class="num-cell model-prob" :title="stock.t0_limit_success_model_version || '未启用模型'">
+                {{ formatPct(stock.t0_limit_success_prob) }}
+              </td>
               <td class="num-cell">{{ stock.touch_days || '--' }}</td>
               <td class="num-cell highlight">{{ stock.limit_up_days || stock.limit_up_count || '--' }}</td>
               <td class="num-cell">{{ formatPct(stock.seal_rate) }}</td>
@@ -164,7 +173,7 @@
             </tr>
             <!-- 涨停/换手率标签行 -->
               <tr v-if="hasEnrichData(stock)" class="enrich-row">
-                <td colspan="4" class="enrich-cell"><span class="enrich-tag lu-desc">{{ stock.lu_desc || '--' }}</span></td>
+                <td colspan="5" class="enrich-cell"><span class="enrich-tag lu-desc">{{ stock.lu_desc || '--' }}</span></td>
                 <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
                 <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
                 <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag open-num">炸板{{ stock.lu_open_num != null ? stock.lu_open_num : 0 }}次</span></td>

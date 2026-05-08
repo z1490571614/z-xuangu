@@ -46,6 +46,7 @@ class SelectedStock(Base):
     # 评分字段
     rule_score = Column(DECIMAL(5, 2), nullable=True)
     model_score = Column(DECIMAL(5, 2), nullable=True)
+    t0_limit_success_prob = Column(DECIMAL(5, 2), nullable=True)
     final_score = Column(DECIMAL(5, 2), nullable=True)
     score_level = Column(String(20), nullable=True)
     score_breakdown = Column(Text, nullable=True)  # JSON
@@ -53,6 +54,7 @@ class SelectedStock(Base):
     risk_tags = Column(Text, nullable=True)  # JSON array
     next_day_plan = Column(Text, nullable=True)
     model_version = Column(String(50), nullable=True)
+    t0_limit_success_model_version = Column(String(50), nullable=True)
 
     created_at = Column(DateTime, server_default=func.now())
 
