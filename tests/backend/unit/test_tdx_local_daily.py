@@ -60,6 +60,46 @@ def test_tdx_local_daily_reads_day_file_as_tushare_shape(tmp_path):
     ]
 
 
+def test_tdx_local_code_scan_only_keeps_common_a_shares(tmp_path):
+    for relative_path in [
+        ("sz", "lday", "sz000001.day"),
+        ("sz", "lday", "sz002001.day"),
+        ("sz", "lday", "sz300001.day"),
+        ("sz", "lday", "sz301001.day"),
+        ("sh", "lday", "sh600001.day"),
+        ("sh", "lday", "sh601001.day"),
+        ("sh", "lday", "sh603001.day"),
+        ("sh", "lday", "sh605001.day"),
+        ("sh", "lday", "sh688001.day"),
+        ("sh", "lday", "sh000001.day"),
+        ("sz", "lday", "sz399001.day"),
+        ("sz", "lday", "sz159001.day"),
+        ("sh", "lday", "sh510001.day"),
+        ("sh", "lday", "sh113001.day"),
+        ("sz", "lday", "sz123001.day"),
+        ("sh", "lday", "sh900001.day"),
+        ("sz", "lday", "sz200001.day"),
+    ]:
+        day_path = tmp_path.joinpath(*relative_path)
+        _write_day_file(
+            day_path,
+            [{"date": 20240510, "open": 10, "high": 10, "low": 10, "close": 10}],
+        )
+    service = TdxLocalSelectorService(tdx_vipdoc_path=str(tmp_path))
+
+    assert service._list_local_ts_codes() == [
+        "600001.SH",
+        "601001.SH",
+        "603001.SH",
+        "605001.SH",
+        "688001.SH",
+        "000001.SZ",
+        "002001.SZ",
+        "300001.SZ",
+        "301001.SZ",
+    ]
+
+
 def test_get_daily_data_prefers_tdx_local_before_tushare(monkeypatch):
     class FakeLocal:
         def get_daily_data(self, **kwargs):
@@ -202,3 +242,89 @@ def test_get_daily_data_reads_stock_daily_data_before_local_or_tushare(db, monke
             "amount": 10000.0,
         }
     ]
+
+
+def test_get_daily_data_filters_cached_market_rows_to_common_a_shares(db, monkeypatch):
+    Base.metadata.create_all(bind=engine)
+    db.add_all(
+        [
+            StockDailyData(
+                ts_code="000001.SZ",
+                trade_date="20991230",
+                open=10,
+                high=11,
+                low=9,
+                close=10.5,
+                pre_close=10,
+                change=0.5,
+                pct_chg=5,
+                vol=1000,
+                amount=10000,
+                is_adj=0,
+            ),
+            StockDailyData(
+                ts_code="399001.SZ",
+                trade_date="20991230",
+                open=1000,
+                high=1010,
+                low=990,
+                close=1005,
+                pre_close=1000,
+                change=5,
+                pct_chg=0.5,
+                vol=1000,
+                amount=10000,
+                is_adj=0,
+            ),
+            StockDailyData(
+                ts_code="510001.SH",
+                trade_date="20991230",
+                open=1,
+                high=1.1,
+                low=0.9,
+                close=1.05,
+                pre_close=1,
+                change=0.05,
+                pct_chg=5,
+                vol=1000,
+                amount=10000,
+                is_adj=0,
+            ),
+        ]
+    )
+    db.commit()
+
+    collector = TushareDataCollector.__new__(TushareDataCollector)
+    monkeypatch.setattr(data_collector_module, "SessionLocal", lambda: db)
+
+    df = collector.get_daily_data(trade_date="20991230")
+
+    assert df["ts_code"].tolist() == ["000001.SZ"]
+
+
+def test_get_daily_data_keeps_explicit_cached_non_common_code_lookup(db, monkeypatch):
+    Base.metadata.create_all(bind=engine)
+    db.add(
+        StockDailyData(
+            ts_code="399001.SZ",
+            trade_date="20991229",
+            open=1000,
+            high=1010,
+            low=990,
+            close=1005,
+            pre_close=1000,
+            change=5,
+            pct_chg=0.5,
+            vol=1000,
+            amount=10000,
+            is_adj=0,
+        )
+    )
+    db.commit()
+
+    collector = TushareDataCollector.__new__(TushareDataCollector)
+    monkeypatch.setattr(data_collector_module, "SessionLocal", lambda: db)
+
+    df = collector.get_daily_data(ts_code="399001.SZ", trade_date="20991229")
+
+    assert df["ts_code"].tolist() == ["399001.SZ"]

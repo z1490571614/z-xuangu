@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import httpx
 import tushare as ts
+from sqlalchemy import or_
 
 os.environ.setdefault('TUSHARE_PRO_SAVE_PATH', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'tushare_cache'))
 os.makedirs(os.environ['TUSHARE_PRO_SAVE_PATH'], exist_ok=True)
@@ -18,6 +19,21 @@ from backend.utils.trading_date import is_trading_day, get_latest_trading_day
 from backend.utils.tushare_client import get_tushare_pro, get_tushare_token
 
 logger = logging.getLogger(__name__)
+
+COMMON_A_SHARE_LIKE_PATTERNS = (
+    "000%.SZ",
+    "001%.SZ",
+    "002%.SZ",
+    "003%.SZ",
+    "300%.SZ",
+    "301%.SZ",
+    "600%.SH",
+    "601%.SH",
+    "603%.SH",
+    "605%.SH",
+    "688%.SH",
+    "689%.SH",
+)
 
 
 class TushareDataCollector:
@@ -296,6 +312,15 @@ class TushareDataCollector:
             query = db.query(StockDailyData)
             if ts_code:
                 query = query.filter(StockDailyData.ts_code == ts_code)
+            else:
+                query = query.filter(
+                    or_(
+                        *(
+                            StockDailyData.ts_code.like(pattern)
+                            for pattern in COMMON_A_SHARE_LIKE_PATTERNS
+                        )
+                    )
+                )
             if trade_date:
                 query = query.filter(StockDailyData.trade_date == trade_date)
             if start_date:

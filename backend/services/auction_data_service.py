@@ -66,7 +66,7 @@ class AuctionDataService:
         self._owns_session = session_factory is SessionLocal
 
     def sync_auction_open(self, trade_date: str) -> int:
-        calendar = self.collector.get_trading_calendar()
+        calendar = self._get_calendar_for_trade_date(trade_date)
         prev_date = get_previous_trading_day(trade_date, calendar)
 
         auction_df = self.collector.get_stk_auction_open(trade_date)
@@ -126,14 +126,29 @@ class AuctionDataService:
         return sum(self.sync_auction_open(trade_date) for trade_date in trade_dates)
 
     def sync_auction_open_date_range(self, start_date: str, end_date: str) -> Dict[str, Any]:
-        calendar = sorted(
-            d for d in self.collector.get_trading_calendar()
-            if start_date <= d <= end_date
-        )
+        calendar = sorted(d for d in self._get_calendar_for_range(start_date, end_date) if start_date <= d <= end_date)
         if not calendar:
             calendar = [start_date] if start_date == end_date else []
         synced_count = self.sync_auction_open_range(calendar)
         return {"trade_dates": calendar, "synced_count": synced_count}
+
+    def _get_calendar_for_trade_date(self, trade_date: str) -> set[str]:
+        year = int(trade_date[:4])
+        return self._get_calendar_for_year(year) | self._get_calendar_for_year(year - 1)
+
+    def _get_calendar_for_range(self, start_date: str, end_date: str) -> set[str]:
+        start_year = int(start_date[:4])
+        end_year = int(end_date[:4])
+        calendar: set[str] = set()
+        for year in range(start_year, end_year + 1):
+            calendar.update(self._get_calendar_for_year(year))
+        return calendar
+
+    def _get_calendar_for_year(self, year: int) -> set[str]:
+        try:
+            return set(self.collector.get_trading_calendar(year))
+        except TypeError:
+            return set(self.collector.get_trading_calendar())
 
     def recalculate_auction_ratios_from_daily_cache(self, start_date: str, end_date: str) -> Dict[str, Any]:
         """用 stock_daily_data 的 T-1 成交量重算已入库竞价数据的竞昨比。"""

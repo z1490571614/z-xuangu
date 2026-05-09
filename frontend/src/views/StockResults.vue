@@ -184,6 +184,7 @@
           </tbody>
         </table>
       </div>
+      <p v-if="t0ModelDisclaimer" class="model-disclaimer">{{ t0ModelDisclaimer }}</p>
     </div>
 
     <!-- 个股详情弹窗 -->
@@ -227,6 +228,7 @@ const currentPage = ref(1)
 const pageSize = 10
 const totalRecords = ref(0)
 const currentRecordId = ref(null)
+const t0ModelDisclaimer = ref('')
 
 const sortField = ref('health_score')
 const sortOrder = ref('desc')
@@ -301,7 +303,9 @@ async function loadStocks(recordId) {
   currentRecordId.value = recordId
   try {
     const res = await axios.get(`/api/v1/stock/results/${recordId}`)
-    stocks.value = res.data?.data?.stocks || []
+    const data = res.data?.data || {}
+    stocks.value = data.stocks || []
+    t0ModelDisclaimer.value = data.t0_model_disclaimer || ''
     
     if (stocks.value.length > 0) {
       startPreload(stocks.value)
@@ -309,6 +313,7 @@ async function loadStocks(recordId) {
   } catch (e) {
     console.error('加载股票失败:', e)
     stocks.value = []
+    t0ModelDisclaimer.value = ''
   }
 }
 
@@ -551,6 +556,13 @@ function isLimitUp(stock) {
 
 /* 表格容器 */
 .table-wrapper { overflow-x: auto; border-radius: 8px; border: 1px solid #f0f0f0; }
+
+.model-disclaimer {
+  margin: 10px 0 0;
+  color: #8c8c8c;
+  font-size: 12px;
+  line-height: 1.6;
+}
 
 .data-table { width: 100%; border-collapse: collapse; margin-top: 12px; white-space: nowrap; }
 .data-table th,

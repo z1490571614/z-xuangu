@@ -142,3 +142,8 @@ def test_train_leader_main_t0_keeps_rows_with_missing_optional_features(db, monk
         is_active=1,
     ).one()
     assert json.loads(mv.model_metrics)["sample_count"] == 100
+    threshold_eval = json.loads(mv.model_metrics)["threshold_evaluation"]
+    assert threshold_eval[0]["threshold"] == 0.1
+    assert threshold_eval[-1]["threshold"] == 0.5
+    assert threshold_eval[-1]["hit_count"] == 10
+    assert threshold_eval[-1]["precision"] == 0.5

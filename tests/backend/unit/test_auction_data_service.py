@@ -91,6 +91,44 @@ def test_sync_auction_open_upserts_without_duplicate_rows(db):
     assert math.isclose(rows[0].auction_turnover_rate, 0.83, abs_tol=0.01)
 
 
+def test_sync_auction_open_uses_trade_date_year_calendar(db):
+    Base.metadata.create_all(bind=engine)
+    calls = []
+
+    class FakeCollector:
+        def get_trading_calendar(self, year=None):
+            calls.append(year)
+            if year == 2024:
+                return {"20240509", "20240510"}
+            return {"20260102"}
+
+        def get_stk_auction_open(self, trade_date):
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": trade_date,
+                        "open": 10.5,
+                        "vol": 819000,
+                        "amount": 8600000,
+                        "vwap": 10.5,
+                    }
+                ]
+            )
+
+        def get_daily_data(self, trade_date=None, **kwargs):
+            assert trade_date == "20240509"
+            return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": trade_date, "vol": 100000}])
+
+        def get_daily_basic(self, trade_date=None):
+            return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": trade_date, "float_share": 9870}])
+
+    service = AuctionDataService(collector=FakeCollector(), session_factory=lambda: db)
+
+    assert service.sync_auction_open("20240510") == 1
+    assert calls == [2024, 2023]
+
+
 def test_recalculate_auction_ratios_from_daily_cache(db):
     Base.metadata.create_all(bind=engine)
     db.add(

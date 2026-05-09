@@ -26,3 +26,6 @@ def test_selection_detail_returns_t0_model_fields(client, db):
     stock = resp.json()["data"]["stocks"][0]
     assert stock["t0_limit_success_prob"] == 72.5
     assert stock["t0_limit_success_model_version"] == "v1"
+    disclaimer = resp.json()["data"]["t0_model_disclaimer"]
+    assert "仅作排序参考" in disclaimer
+    assert "不构成投资建议" in disclaimer

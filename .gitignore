@@ -32,6 +32,9 @@ Database
 *.sqlite3
 data/
 
+Model artifacts
+backend/models/*.pkl
+
 Logs
 logs/
 *.log

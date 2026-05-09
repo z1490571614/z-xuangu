@@ -32,6 +32,18 @@ def get_limit_price(code: str, prev_close: float) -> float:
     return round(prev_close * (1 + get_limit_ratio(code)), 2)
 
 
+def is_common_a_share_ts_code(ts_code: str) -> bool:
+    """仅保留沪深普通 A 股，排除指数、ETF、债券、基金和 B 股。"""
+    if not ts_code or "." not in ts_code:
+        return False
+    code, suffix = ts_code.split(".", 1)
+    if suffix == "SZ":
+        return code.startswith(("000", "001", "002", "003", "300", "301"))
+    if suffix == "SH":
+        return code.startswith(("600", "601", "603", "605", "688", "689"))
+    return False
+
+
 @dataclass
 class TdxLocalResult:
     ts_code: str
@@ -196,8 +208,7 @@ class TdxLocalSelectorService:
                     ts_code = f"{code}.SZ"
                     stock_list.append({'ts_code': ts_code, 'name': '', 'market': 'sz'})
         
-        # 过滤北交所股票（代码以 8 开头）
-        stock_list = [s for s in stock_list if not s['ts_code'].startswith('8')]
+        stock_list = [s for s in stock_list if is_common_a_share_ts_code(s["ts_code"])]
         
         self._stock_cache = pd.DataFrame(stock_list)
         logger.info(f"本地选股股票池初始化: {len(self._stock_cache)} 只 (从 .day 文件扫描)")

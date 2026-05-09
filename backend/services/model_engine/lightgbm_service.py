@@ -47,6 +47,8 @@ LEADER_MAIN_T0_FEATURE_COLS = [
     "sector_limit_up_count",
 ]
 
+LEADER_MAIN_T0_THRESHOLD_GRID = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+
 # joblib 为可选依赖，用于模型持久化
 try:
     import joblib
@@ -175,6 +177,43 @@ def batch_predict_model(
         return stocks_data
     finally:
         db.close()
+
+
+def evaluate_leader_main_t0_thresholds(
+    y_true,
+    y_prob,
+    eval_df: Optional[pd.DataFrame] = None,
+    thresholds: Optional[List[float]] = None,
+) -> List[Dict[str, Any]]:
+    """评估不同概率阈值下的命中数、查准率、召回率与收益近似。"""
+    from sklearn.metrics import accuracy_score, precision_score, recall_score
+
+    y_true_arr = np.asarray(y_true)
+    y_prob_arr = np.asarray(y_prob)
+    results: List[Dict[str, Any]] = []
+    for threshold in thresholds or LEADER_MAIN_T0_THRESHOLD_GRID:
+        y_pred = (y_prob_arr >= threshold).astype(int)
+        picked_mask = y_pred == 1
+        picked = eval_df[picked_mask] if eval_df is not None else None
+        avg_return = None
+        max_drawdown_like = None
+        if picked is not None and not picked.empty:
+            if "t0_close_return" in picked.columns:
+                avg_return = round(float(pd.to_numeric(picked["t0_close_return"], errors="coerce").mean()), 4)
+            if "t0_low_return" in picked.columns:
+                max_drawdown_like = round(float(pd.to_numeric(picked["t0_low_return"], errors="coerce").min()), 4)
+        results.append(
+            {
+                "threshold": round(float(threshold), 2),
+                "precision": round(float(precision_score(y_true_arr, y_pred, zero_division=0)), 4),
+                "recall": round(float(recall_score(y_true_arr, y_pred, zero_division=0)), 4),
+                "hit_count": int(picked_mask.sum()),
+                "avg_return": avg_return,
+                "max_drawdown_like": max_drawdown_like,
+                "accuracy": round(float(accuracy_score(y_true_arr, y_pred)), 4),
+            }
+        )
+    return results
 
 
 def train_lightgbm(start_date: str, end_date: str) -> Optional[str]:
@@ -316,6 +355,8 @@ def train_leader_main_t0_lgbm(start_date: str, end_date: str) -> Optional[str]:
             row = {col: getattr(r, col, None) for col in LEADER_MAIN_T0_FEATURE_COLS}
             row["label_t0_limit_success"] = r.label_t0_limit_success
             row["trade_date"] = r.trade_date
+            row["t0_close_return"] = r.t0_close_return
+            row["t0_low_return"] = r.t0_low_return
             data.append(row)
 
         df = pd.DataFrame(data).dropna(subset=["label_t0_limit_success"])
@@ -381,6 +422,11 @@ def train_leader_main_t0_lgbm(start_date: str, end_date: str) -> Optional[str]:
             "train_dates": len(train_dates),
             "validation_dates": len(val_dates),
             "test_dates": len(test_dates),
+            "threshold_evaluation": evaluate_leader_main_t0_thresholds(
+                y_test,
+                y_prob,
+                test_df,
+            ),
             "feature_importance": dict(zip(LEADER_MAIN_T0_FEATURE_COLS, model.feature_importances_.tolist())),
         }
 
