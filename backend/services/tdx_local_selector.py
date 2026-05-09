@@ -11,6 +11,8 @@ import logging
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 
+import pandas as pd
+
 logger = logging.getLogger(__name__)
 
 PRICE_SCALE = 100.0
@@ -66,6 +68,7 @@ class TdxLocalSelectorService:
         )
         self._stock_cache = None
         self._st_set = None
+        self._day_record_cache: Dict[str, List[tuple]] = {}
 
     @staticmethod
     def _read_day_file(filepath: str) -> List[tuple]:
@@ -75,15 +78,22 @@ class TdxLocalSelectorService:
         records = []
         for i in range(n):
             offset = i * 32
-            date, o, h, l, c = struct.unpack_from('<IIIII', data, offset)
+            date, o, h, l, c, amount, vol = struct.unpack_from('<IIIIIfI', data, offset)
             records.append((
                 date,
                 o / PRICE_SCALE,
                 h / PRICE_SCALE,
                 l / PRICE_SCALE,
                 c / PRICE_SCALE,
+                float(amount),
+                int(vol),
             ))
         return records
+
+    def _get_day_records(self, filepath: str) -> List[tuple]:
+        if filepath not in self._day_record_cache:
+            self._day_record_cache[filepath] = self._read_day_file(filepath)
+        return self._day_record_cache[filepath]
 
     def _ts_code_to_day_path(self, ts_code: str) -> Optional[str]:
         code = ts_code.split('.')[0]
@@ -93,6 +103,70 @@ class TdxLocalSelectorService:
         elif suffix == 'SZ':
             return os.path.join(self.tdx_vipdoc_path, 'sz', 'lday', f'sz{code}.day')
         return None
+
+    def get_daily_data(
+        self,
+        ts_code: Optional[str] = None,
+        trade_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        从通达信本地 .day 文件读取日线行情，返回兼容 Tushare daily 的字段。
+        """
+        if not trade_date and not start_date and not end_date:
+            return pd.DataFrame()
+
+        targets = [ts_code] if ts_code else self._list_local_ts_codes()
+        rows = []
+        for target in targets:
+            if not target:
+                continue
+            path = self._ts_code_to_day_path(target)
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                records = sorted(self._get_day_records(path), key=lambda x: x[0])
+            except Exception as e:
+                logger.debug(f"读取通达信日线失败: {target} {e}")
+                continue
+
+            for idx, record in enumerate(records):
+                date_value = str(record[0])
+                if trade_date and date_value != trade_date:
+                    continue
+                if start_date and date_value < start_date:
+                    continue
+                if end_date and date_value > end_date:
+                    continue
+
+                pre_close = records[idx - 1][4] if idx > 0 else None
+                close = record[4]
+                change = None
+                pct_chg = None
+                if pre_close and pre_close > 0:
+                    change = round(close - pre_close, 2)
+                    pct_chg = round((close - pre_close) / pre_close * 100, 3)
+                rows.append({
+                    "ts_code": target,
+                    "trade_date": date_value,
+                    "open": record[1],
+                    "high": record[2],
+                    "low": record[3],
+                    "close": close,
+                    "pre_close": pre_close,
+                    "change": change,
+                    "pct_chg": pct_chg,
+                    "vol": record[6],
+                    "amount": record[5],
+                })
+        return pd.DataFrame(rows)
+
+    def _list_local_ts_codes(self) -> List[str]:
+        self._ensure_stock_list()
+        if self._stock_cache is None or self._stock_cache.empty:
+            return []
+        return self._stock_cache["ts_code"].tolist()
 
     def _ensure_stock_list(self):
         """从本地 .day 文件目录扫描股票列表（不依赖Tushare）"""

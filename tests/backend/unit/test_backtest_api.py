@@ -146,8 +146,8 @@ def test_list_leader_main_t0_samples_endpoint(client, db):
     Base.metadata.create_all(bind=engine)
     db.add(
         LeaderMainT0TrainingSample(
-            trade_date="20240510",
-            ts_code="000001.SZ",
+            trade_date="20991231",
+            ts_code="999001.SZ",
             name="平安银行",
             auction_ratio=8.19,
             auction_turnover_rate=0.83,
@@ -161,12 +161,12 @@ def test_list_leader_main_t0_samples_endpoint(client, db):
 
     resp = client.get(
         "/api/v1/backtest/leader-main-t0/samples",
-        params={"start_date": "20240510", "end_date": "20240510", "page": 1, "page_size": 20},
+        params={"start_date": "20991231", "end_date": "20991231", "page": 1, "page_size": 20},
     )
 
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert data["total"] == 1
-    assert data["samples"][0]["ts_code"] == "000001.SZ"
+    assert data["samples"][0]["ts_code"] == "999001.SZ"
     assert data["samples"][0]["label_t0_limit_success"] == 1
     assert data["samples"][0]["feature"]["filter_status"] == "included"

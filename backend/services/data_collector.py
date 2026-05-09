@@ -34,6 +34,7 @@ class TushareDataCollector:
 
         self._trading_calendar_cache: Dict[int, set] = {}
         self._last_pro: Optional[Any] = None
+        self._tdx_local_daily: Optional[Any] = None
 
     @property
     def pro(self):
@@ -239,6 +240,20 @@ class TushareDataCollector:
             日线行情DataFrame
         """
         try:
+            if not trade_date and not start_date and not end_date:
+                logger.warning("get_daily_data 缺少日期参数")
+                return pd.DataFrame()
+
+            local_df = self._get_tdx_local_daily().get_daily_data(
+                ts_code=ts_code,
+                trade_date=trade_date,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if local_df is not None and not local_df.empty:
+                logger.info(f"获取通达信本地日线成功，共 {len(local_df)} 条记录")
+                return local_df
+
             kwargs = {
                 'fields': 'ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount'
             }
@@ -250,15 +265,19 @@ class TushareDataCollector:
                 kwargs['start_date'] = start_date
             if end_date:
                 kwargs['end_date'] = end_date
-            if not trade_date and not start_date and not end_date:
-                logger.warning("get_daily_data 缺少日期参数")
-                return pd.DataFrame()
             df = self.pro.daily(**kwargs)
             logger.info(f"获取日线行情成功，共 {len(df)} 条记录")
             return df
         except Exception as e:
             logger.error(f"获取日线行情失败: {e}")
             return pd.DataFrame()
+
+    def _get_tdx_local_daily(self):
+        if getattr(self, "_tdx_local_daily", None) is None:
+            from backend.services.tdx_local_selector import TdxLocalSelectorService
+
+            self._tdx_local_daily = TdxLocalSelectorService()
+        return self._tdx_local_daily
 
     def get_daily_basic(self, trade_date: Optional[str] = None) -> pd.DataFrame:
         """
