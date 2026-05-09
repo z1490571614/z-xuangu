@@ -12,6 +12,8 @@ import tushare as ts
 os.environ.setdefault('TUSHARE_PRO_SAVE_PATH', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'tushare_cache'))
 os.makedirs(os.environ['TUSHARE_PRO_SAVE_PATH'], exist_ok=True)
 
+from backend.database import SessionLocal
+from backend.models.seal_rate import StockDailyData
 from backend.utils.trading_date import is_trading_day, get_latest_trading_day
 from backend.utils.tushare_client import get_tushare_pro, get_tushare_token
 
@@ -244,6 +246,16 @@ class TushareDataCollector:
                 logger.warning("get_daily_data 缺少日期参数")
                 return pd.DataFrame()
 
+            cached_df = self._get_daily_data_from_db(
+                ts_code=ts_code,
+                trade_date=trade_date,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if cached_df is not None and not cached_df.empty:
+                logger.info(f"获取本地日线库成功，共 {len(cached_df)} 条记录")
+                return cached_df
+
             local_df = self._get_tdx_local_daily().get_daily_data(
                 ts_code=ts_code,
                 trade_date=trade_date,
@@ -271,6 +283,49 @@ class TushareDataCollector:
         except Exception as e:
             logger.error(f"获取日线行情失败: {e}")
             return pd.DataFrame()
+
+    def _get_daily_data_from_db(
+        self,
+        ts_code: Optional[str] = None,
+        trade_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        db = SessionLocal()
+        try:
+            query = db.query(StockDailyData)
+            if ts_code:
+                query = query.filter(StockDailyData.ts_code == ts_code)
+            if trade_date:
+                query = query.filter(StockDailyData.trade_date == trade_date)
+            if start_date:
+                query = query.filter(StockDailyData.trade_date >= start_date)
+            if end_date:
+                query = query.filter(StockDailyData.trade_date <= end_date)
+            rows = query.order_by(StockDailyData.ts_code, StockDailyData.trade_date).all()
+            if not rows:
+                return pd.DataFrame()
+            return pd.DataFrame([
+                {
+                    "ts_code": row.ts_code,
+                    "trade_date": row.trade_date,
+                    "open": row.open,
+                    "high": row.high,
+                    "low": row.low,
+                    "close": row.close,
+                    "pre_close": row.pre_close,
+                    "change": row.change,
+                    "pct_chg": row.pct_chg,
+                    "vol": row.vol,
+                    "amount": row.amount,
+                }
+                for row in rows
+            ])
+        except Exception as e:
+            logger.debug(f"读取本地日线库失败，降级到文件/API: {e}")
+            return pd.DataFrame()
+        finally:
+            db.close()
 
     def _get_tdx_local_daily(self):
         if getattr(self, "_tdx_local_daily", None) is None:

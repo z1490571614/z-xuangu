@@ -4,6 +4,7 @@ import pandas as pd
 
 from backend.database import Base, engine
 from backend.models.auction_backtest import StockAuctionOpen
+from backend.models.seal_rate import StockDailyData
 from backend.services.auction_data_service import (
     AuctionDataService,
     calculate_auction_metrics,
@@ -88,6 +89,44 @@ def test_sync_auction_open_upserts_without_duplicate_rows(db):
     assert rows[0].source == "tushare_stk_auction_o"
     assert rows[0].auction_ratio == 8.19
     assert math.isclose(rows[0].auction_turnover_rate, 0.83, abs_tol=0.01)
+
+
+def test_recalculate_auction_ratios_from_daily_cache(db):
+    Base.metadata.create_all(bind=engine)
+    db.add(
+        StockDailyData(
+            ts_code="999001.SZ",
+            trade_date="20991230",
+            open=10,
+            high=11,
+            low=9,
+            close=10,
+            vol=100000,
+            is_adj=0,
+        )
+    )
+    db.add(
+        StockAuctionOpen(
+            trade_date="20991231",
+            ts_code="999001.SZ",
+            open=10.5,
+            vol=819000,
+            auction_ratio=0.08,
+            auction_turnover_rate=0.83,
+        )
+    )
+    db.commit()
+
+    service = AuctionDataService(collector=object(), session_factory=lambda: db)
+
+    result = service.recalculate_auction_ratios_from_daily_cache("20991231", "20991231")
+
+    row = db.query(StockAuctionOpen).filter_by(trade_date="20991231", ts_code="999001.SZ").first()
+    assert result["updated_count"] == 1
+    assert result["missing_count"] == 0
+    assert result["trade_dates"] == ["20991231"]
+    assert row.auction_ratio == 8.19
+    assert math.isclose(row.auction_turnover_rate, 0.83, abs_tol=0.01)
 
 
 def test_daily_basic_request_includes_float_share(monkeypatch):

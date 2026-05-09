@@ -16,6 +16,8 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 PRICE_SCALE = 100.0
+TDX_VOL_TO_TUSHARE_VOL_SCALE = 100.0
+TDX_AMOUNT_TO_TUSHARE_AMOUNT_SCALE = 1000.0
 
 # 板块涨跌幅比例
 def get_limit_ratio(stock_code: str) -> float:
@@ -85,8 +87,8 @@ class TdxLocalSelectorService:
                 h / PRICE_SCALE,
                 l / PRICE_SCALE,
                 c / PRICE_SCALE,
-                float(amount),
-                int(vol),
+                float(amount) / TDX_AMOUNT_TO_TUSHARE_AMOUNT_SCALE,
+                int(vol) / TDX_VOL_TO_TUSHARE_VOL_SCALE,
             ))
         return records
 

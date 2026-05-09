@@ -2,6 +2,7 @@
 历史开盘集合竞价数据同步服务。
 """
 import logging
+from bisect import bisect_left
 from datetime import datetime
 from typing import Any, Dict, Iterable, Optional
 
@@ -9,6 +10,7 @@ import pandas as pd
 
 from backend.database import SessionLocal
 from backend.models.auction_backtest import StockAuctionOpen
+from backend.models.seal_rate import StockDailyData
 from backend.services.data_collector import TushareDataCollector
 from backend.utils.trading_date import get_previous_trading_day
 
@@ -132,6 +134,86 @@ class AuctionDataService:
             calendar = [start_date] if start_date == end_date else []
         synced_count = self.sync_auction_open_range(calendar)
         return {"trade_dates": calendar, "synced_count": synced_count}
+
+    def recalculate_auction_ratios_from_daily_cache(self, start_date: str, end_date: str) -> Dict[str, Any]:
+        """用 stock_daily_data 的 T-1 成交量重算已入库竞价数据的竞昨比。"""
+        db = self.session_factory()
+        updated = 0
+        missing = 0
+        try:
+            daily_dates = [
+                row[0]
+                for row in db.query(StockDailyData.trade_date)
+                .filter(StockDailyData.trade_date <= end_date)
+                .distinct()
+                .order_by(StockDailyData.trade_date)
+                .all()
+            ]
+            previous_by_date = {}
+            previous = None
+            for trade_date in daily_dates:
+                previous_by_date[trade_date] = previous
+                previous = trade_date
+
+            trade_dates = [
+                row[0]
+                for row in db.query(StockAuctionOpen.trade_date)
+                .filter(StockAuctionOpen.trade_date.between(start_date, end_date))
+                .distinct()
+                .order_by(StockAuctionOpen.trade_date)
+                .all()
+            ]
+            for trade_date in trade_dates:
+                prev_date = previous_by_date.get(trade_date)
+                if not prev_date:
+                    idx = bisect_left(daily_dates, trade_date)
+                    prev_date = daily_dates[idx - 1] if idx > 0 else None
+                if not prev_date:
+                    missing += db.query(StockAuctionOpen).filter(
+                        StockAuctionOpen.trade_date == trade_date
+                    ).count()
+                    continue
+                prev_volume = {
+                    row.ts_code: row.vol
+                    for row in db.query(StockDailyData.ts_code, StockDailyData.vol)
+                    .filter(StockDailyData.trade_date == prev_date)
+                    .all()
+                }
+                for auction in db.query(StockAuctionOpen).filter(
+                    StockAuctionOpen.trade_date == trade_date
+                ).all():
+                    metrics = calculate_auction_metrics(
+                        auction.vol,
+                        prev_volume.get(auction.ts_code),
+                        None,
+                    )
+                    if metrics["auction_ratio"] is None:
+                        auction.auction_ratio = None
+                        missing += 1
+                    else:
+                        auction.auction_ratio = metrics["auction_ratio"]
+                        updated += 1
+            db.commit()
+            return {
+                "start_date": start_date,
+                "end_date": end_date,
+                "trade_dates": trade_dates,
+                "updated_count": updated,
+                "missing_count": missing,
+            }
+        except Exception:
+            db.rollback()
+            logger.exception(f"重算竞昨比失败: {start_date}~{end_date}")
+            return {
+                "start_date": start_date,
+                "end_date": end_date,
+                "trade_dates": [],
+                "updated_count": 0,
+                "missing_count": missing,
+            }
+        finally:
+            if self._owns_session:
+                db.close()
 
     def get_auction_features(self, trade_date: str, ts_code: str) -> Dict[str, Any]:
         data = self.batch_get_auction_features(trade_date, [ts_code])

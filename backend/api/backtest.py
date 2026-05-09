@@ -14,6 +14,7 @@ from backend.services.auction_data_service import AuctionDataService
 from backend.services.backtest.leader_main_t0_feature_builder import LeaderMainT0FeatureBuilder
 from backend.services.backtest.leader_main_t0_label_builder import LeaderMainT0LabelBuilder
 from backend.services.model_engine.lightgbm_service import train_leader_main_t0_lgbm
+from backend.services.tdx_local_daily_sync_service import TdxLocalDailySyncService
 
 router = APIRouter()
 
@@ -29,6 +30,10 @@ class LeaderMainT0BuildRequest(BaseModel):
 class DateRangeRequest(BaseModel):
     start_date: str = Field(..., min_length=8, max_length=8)
     end_date: str = Field(..., min_length=8, max_length=8)
+
+
+class TdxLocalDailySyncRequest(DateRangeRequest):
+    ts_codes: List[str] | None = None
 
 
 class LeaderMainT0RunRequest(DateRangeRequest):
@@ -68,6 +73,41 @@ async def sync_auction_open_range(request: DateRangeRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"竞价数据区间同步失败: {e}")
+
+
+@router.post("/backtest/tdx-local-daily/sync", tags=["回测"])
+async def sync_tdx_local_daily(request: TdxLocalDailySyncRequest):
+    """将通达信本地 .day 日线同步到 stock_daily_data。"""
+    try:
+        result = TdxLocalDailySyncService().sync_range(
+            request.start_date,
+            request.end_date,
+            ts_codes=request.ts_codes,
+        )
+        return ApiResponse(
+            code=200,
+            message="通达信本地日线同步完成",
+            data=result,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"通达信本地日线同步失败: {e}")
+
+
+@router.post("/backtest/auction/recalculate-ratios", tags=["回测"])
+async def recalculate_auction_ratios(request: DateRangeRequest):
+    """用本地日线库重算已入库竞价数据的竞昨比。"""
+    try:
+        result = AuctionDataService().recalculate_auction_ratios_from_daily_cache(
+            request.start_date,
+            request.end_date,
+        )
+        return ApiResponse(
+            code=200,
+            message="竞昨比重算完成",
+            data=result,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"竞昨比重算失败: {e}")
 
 
 @router.post("/backtest/leader-main-t0/build", tags=["回测"])
