@@ -1,0 +1,512 @@
+# 默认竞价策略胜率模型 V2 设计
+
+## 背景
+
+当前 `leader_main_t0_lgbm` 训练链路更偏“历史竞价表生成候选 + T+0 封板排序”。它不能直接代表默认竞价策略每天真实选出的股票，也不能覆盖“高溢价”和“连板”两个接力核心目标。
+
+新的模型目标不是替代默认选股策略，而是服务默认策略：对每天默认竞价策略已经选出的股票，预测后续涨停、高溢价、连板的概率，并给出可回测、可解释的排序依据。
+
+由于当前没有大量真实生产环境每日选股列表，训练数据不能只依赖 `selected_stock` 的真实历史记录。需要先用默认策略做历史回放，再用最近几个有真实选股记录的交易日验证回放结果。如果回放选股和真实选股差距不大，才认为该回放策略可用于生成训练样本。
+
+## 目标
+
+新增 `default_auction_relay_v2` 训练体系，支持：
+
+1. 用默认竞价选股策略回放历史交易日，生成候选股票。
+2. 用最近真实选股列表验证回放策略有效性。
+3. 验证通过后，生成历史训练样本。
+4. 给样本生成三个标签：T+0 涨停/封板、T+1 高溢价、T+1 连板。
+5. 训练三个独立模型，并输出综合接力分。
+6. 在模型中心展示训练指标、TopK 胜率、分桶报告和模型版本。
+7. 在当前选股结果中展示概率，不改变默认策略本身。
+
+## 非目标
+
+本期不做：
+
+1. 不训练全市场涨停预测模型。
+2. 不用新闻、公告、舆情或 AI 文本因素。
+3. 不直接修改默认选股策略条件。
+4. 不让模型结果阻断或替代现有选股流程。
+5. 不删除旧 `leader_main_t0_lgbm`，仅将其降级为兼容模型。
+
+## 样本口径
+
+训练服务的对象是默认竞价策略选出的股票。
+
+真实样本：
+
+```text
+selection_record.task_template = default
++ selected_stock
+```
+
+历史回放样本：
+
+```text
+DefaultAuctionReplayService
+  -> 按默认策略条件回放历史交易日
+  -> 生成候选列表
+  -> 保存当时可见特征
+```
+
+样本必须记录来源：
+
+```text
+sample_source = real_selected | replay_backtest
+replay_source = mcp_replay | local_replay | historical_backfill
+strategy_name = default
+strategy_version = default_auction_v2
+```
+
+## 策略回放有效性验证
+
+训练前必须先验证回放策略是否接近近期真实选股。
+
+验证集：
+
+```text
+最近 N 个有真实 selected_stock 记录的交易日
+```
+
+每日对比：
+
+```text
+真实列表 = 当天默认策略真实选股
+回放列表 = 用默认策略历史数据重新跑出的选股
+```
+
+指标：
+
+```text
+recall = 真实列表中被回放命中的比例
+precision = 回放列表中也出现在真实列表的比例
+jaccard = 交集 / 并集
+count_error = abs(回放数量 - 真实数量) / max(真实数量, 1)
+top_overlap = Top5 / Top10 重合度
+```
+
+默认验收线：
+
+```text
+平均 recall >= 80%
+平均 jaccard >= 60%
+每日数量误差 <= 30%
+核心差异股票必须可解释
+```
+
+如果验收失败，不允许批量生成训练样本。系统应输出差异诊断，包括竞价字段、涨停次数、封板率、近 10 日涨幅、过滤原因和排序差异。
+
+## 竞价数据口径
+
+模型必须贴近生产默认策略的竞价口径。
+
+核心字段：
+
+```text
+auction_ratio
+auction_turnover_rate
+open_change_pct
+pre_change_pct
+```
+
+历史回放竞价数据优先级：
+
+1. 能复刻生产 MCP/通达信竞价字段的历史数据。
+2. 已落库的生产竞价字段。
+3. `stock_auction_open` 仅作为历史补齐来源。
+
+所有样本必须保存：
+
+```text
+auction_source
+auction_ratio_unit
+auction_turnover_rate_basis
+feature_snapshot_time
+```
+
+`auction_ratio` 统一使用百分数口径，例如 `8.19` 表示 `8.19%`。竞价换手率必须记录分母口径，优先贴近生产策略使用的自由流通换手口径。
+
+## 特征设计
+
+不使用新闻因素。明确排除：
+
+```text
+integrated_news_service
+SentimentAnalyzer
+news_sentiment
+announcement_alpha_score
+has_negative_news
+has_reduction_news
+has_regulatory_risk
+```
+
+竞价特征：
+
+```text
+auction_ratio
+auction_turnover_rate
+open_change_pct
+pre_change_pct
+auction_amount
+auction_volume
+```
+
+默认策略结构特征：
+
+```text
+limit_up_count
+touch_days
+limit_up_days
+seal_rate
+rise_10d_pct
+circ_mv
+prev_turnover_rate
+lu_tag
+lu_status
+lu_open_num
+limit_up_suc_rate
+```
+
+评分特征：
+
+```text
+rule_score
+final_score
+score_level_encoded
+risk_tags_count
+```
+
+市场环境特征：
+
+```text
+market_limit_up_count
+market_limit_down_count
+market_max_connected_board
+market_zhaban_rate
+market_emotion_score
+```
+
+板块特征：
+
+```text
+sector_strength
+sector_limit_up_count
+sector_rank
+is_sector_front_runner
+sector_change_pct
+```
+
+龙头和风险特征，仅使用非新闻部分：
+
+```text
+leader_strength_score
+retreat_risk_score
+health_score
+leader_level_encoded
+cycle_stage_encoded
+risk_total_score
+market_score
+chip_score
+capital_score
+lhb_score
+sector_score
+technical_score
+```
+
+## 标签定义
+
+### A. T+0 涨停/封板
+
+```text
+label_t0_limit_success = 1
+```
+
+条件：
+
+```text
+T 日最高价触及涨停价
+且 T 日收盘价 >= 涨停价 * 0.997
+```
+
+### B. T+1 高溢价
+
+```text
+label_t1_premium_success = 1
+```
+
+默认满足任一：
+
+```text
+T+1 开盘涨幅 >= 3%
+T+1 最高涨幅 >= 5%
+T+1 收盘涨幅 >= 3%
+```
+
+阈值写入模型参数，允许在模型中心调整。
+
+### C. T+1 连板
+
+```text
+label_t1_continue_limit = 1
+```
+
+条件：
+
+```text
+T+1 最高价触及涨停价
+且 T+1 收盘价 >= 涨停价 * 0.997
+```
+
+### 一字板处理
+
+不直接删除一字板样本。增加标记：
+
+```text
+is_t0_one_line_limit_up
+is_t1_one_line_limit_up
+```
+
+评估时同时输出：
+
+```text
+全部样本胜率
+可参与样本胜率
+一字板样本占比
+```
+
+## 数据表
+
+新增表：
+
+```text
+default_auction_training_sample
+```
+
+建议字段：
+
+```text
+id
+trade_date
+ts_code
+name
+strategy_name
+strategy_version
+sample_source
+replay_source
+matched_recent_real_sample
+auction_source
+auction_ratio_unit
+auction_turnover_rate_basis
+feature_json
+label_t0_limit_success
+label_t1_premium_success
+label_t1_continue_limit
+t0_high_return
+t0_close_return
+t1_open_return
+t1_high_return
+t1_close_return
+is_t0_limit_up
+is_t1_limit_up
+is_t0_one_line_limit_up
+is_t1_one_line_limit_up
+created_at
+updated_at
+```
+
+唯一约束：
+
+```text
+strategy_version + trade_date + ts_code + sample_source
+```
+
+## 模型设计
+
+训练三个独立 LightGBM 模型：
+
+```text
+default_auction_t0_limit_lgbm
+default_auction_t1_premium_lgbm
+default_auction_t1_continue_lgbm
+```
+
+三个目标不同，不能混成一个标签。综合接力分在预测后计算：
+
+```text
+relay_score =
+  t0_limit_prob * 0.25
++ t1_premium_prob * 0.35
++ t1_continue_prob * 0.40
+```
+
+初期只展示概率和综合分，不改变默认策略筛选条件。
+
+## 训练切分
+
+按交易日期做时间序列切分，禁止随机打乱：
+
+```text
+70% train
+15% validation
+15% test
+```
+
+样本不足时：
+
+1. 输出样本不足诊断。
+2. 可训练 LogisticRegression 或小参数 LightGBM 作为 baseline。
+3. 不自动激活低样本模型。
+
+## 评估和验收
+
+不能只看 accuracy。必须输出策略场景指标：
+
+```text
+默认策略全体基础胜率
+模型 Top1 胜率
+模型 Top3 胜率
+模型 Top5 胜率
+概率分桶胜率
+按竞昨比分组胜率
+按竞价换手分组胜率
+按市场情绪分组胜率
+按连板高度分组胜率
+```
+
+模型通过标准建议：
+
+```text
+Top3 胜率 > 默认策略全体胜率 + 10 个百分点
+Top5 胜率 > 默认策略全体胜率 + 6 个百分点
+测试集命中样本数 >= 30
+最近测试区间不能只靠单一天贡献
+```
+
+如果模型没有跑赢默认策略基准，不允许自动激活。
+
+## 诊断报告
+
+训练任务必须输出诊断报告：
+
+```text
+1. 回放策略与真实选股差距
+2. 默认策略自身基础胜率
+3. 各条件分桶胜率
+4. 竞昨比区间胜率
+5. 竞价换手区间胜率
+6. 连板/非连板样本胜率
+7. 高分低胜率样本共性
+8. 低分高胜率漏判样本共性
+```
+
+报告用于判断老模型胜率低的原因：
+
+```text
+策略条件过苛刻
+策略条件过宽
+竞价数据口径错误
+标签定义不贴合实盘
+模型特征不足
+市场阶段导致短期失效
+```
+
+## 后端模块
+
+新增服务：
+
+```text
+backend/services/model_engine/default_auction_replay_service.py
+backend/services/model_engine/replay_validation_service.py
+backend/services/model_engine/default_auction_sample_builder.py
+backend/services/model_engine/default_auction_label_builder.py
+backend/services/model_engine/default_auction_model_trainer.py
+backend/services/model_engine/default_auction_model_evaluator.py
+```
+
+复用现有能力：
+
+```text
+ModelVersion
+ModelTrainingJob
+lightgbm_service
+selected_stock
+selection_record
+dragon_leader_score
+stock_risk_breakdown
+dc_board_service
+lhb_service
+seat_library
+```
+
+## API 设计
+
+复用模型中心，在 `backend/api/model_management.py` 下扩展：
+
+```text
+POST /api/v1/models/default-auction-replay/validate
+POST /api/v1/models/default-auction-replay/build-samples
+POST /api/v1/models/default-auction-relay/train
+GET  /api/v1/models/default-auction-relay/diagnostics/{job_id}
+POST /api/v1/models/default-auction-relay/refresh-predictions
+```
+
+训练任务继续写入 `model_training_job`，模型版本继续写入 `model_version`。
+
+## 前端展示
+
+模型中心新增 `default_auction_relay_v2` 区块：
+
+1. 回放验收结果。
+2. 样本构建进度。
+3. 三个模型的指标。
+4. TopK 胜率表。
+5. 分桶胜率报告。
+6. 诊断报告。
+
+选股结果页新增字段：
+
+```text
+T+0 涨停概率
+T+1 高溢价概率
+T+1 连板概率
+综合接力分
+模型版本
+```
+
+前端必须覆盖 loading / error / empty 三态。
+
+## 错误与降级
+
+1. 回放验收失败：不生成训练样本，输出差异诊断。
+2. 历史竞价数据缺失：记录缺失原因，不伪造竞价特征。
+3. 标签行情缺失：该样本标签置空，不参与对应模型训练。
+4. 模型未通过验收：保存训练结果，不自动激活。
+5. 模型预测失败：概率返回 `None`，不影响默认选股。
+
+## 实施顺序
+
+1. 新增训练样本表和轻量迁移。
+2. 实现默认策略历史回放服务。
+3. 实现近期真实选股对比和回放验收。
+4. 实现样本构建和特征快照。
+5. 实现 A/B/C 标签生成。
+6. 实现三个模型训练和评估。
+7. 接入 `ModelTrainingJob` 和 `ModelVersion`.
+8. 接入模型中心 API。
+9. 接入前端模型中心展示。
+10. 接入选股结果概率展示。
+
+## 验收标准
+
+开发完成后应满足：
+
+1. 可以选择一段日期执行默认策略历史回放。
+2. 可以用最近真实选股记录验证回放相似度。
+3. 回放不达标时不会进入训练。
+4. 回放达标后可以生成 `default_auction_training_sample`。
+5. 可以分别训练 T+0 涨停、T+1 高溢价、T+1 连板模型。
+6. 训练结果包含 Top1 / Top3 / Top5 胜率。
+7. 不使用新闻因素。
+8. 模型未通过验收时不会替换 active 版本。
+9. 当前默认选股流程在模型不可用时正常降级。
