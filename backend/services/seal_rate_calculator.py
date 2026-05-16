@@ -379,9 +379,10 @@ class SealRateCalculator:
             计算结果
         """
         # 1. 检查缓存
+        cached = None
         if use_cache and not force_refresh:
             cached = self.get_cached_result(ts_code, trade_date, period_days)
-            if cached:
+            if cached and cached.data_complete:
                 logger.info(f"从缓存获取 {ts_code} 在 {trade_date} 的封板率: {cached.seal_rate}%")
                 return {
                     'ts_code': ts_code,
@@ -395,11 +396,26 @@ class SealRateCalculator:
                     'data_complete': cached.data_complete,
                     'from_cache': True,
                 }
+            if cached:
+                logger.info(f"{ts_code} 在 {trade_date} 的封板率缓存不完整，尝试从本地日线重算")
 
         # 2. 获取交易日列表
         trading_dates = self.get_trading_dates(trade_date, period_days)
         if not trading_dates:
             logger.warning(f"未获取到交易日列表")
+            if cached:
+                return {
+                    'ts_code': ts_code,
+                    'trade_date': trade_date,
+                    'period_days': period_days,
+                    'touch_days': cached.touch_days,
+                    'limit_up_days': cached.limit_up_days,
+                    'seal_rate': cached.seal_rate,
+                    'start_date': cached.start_date,
+                    'end_date': cached.end_date,
+                    'data_complete': cached.data_complete,
+                    'from_cache': True,
+                }
             return {
                 'ts_code': ts_code,
                 'trade_date': trade_date,
@@ -411,15 +427,33 @@ class SealRateCalculator:
                 'from_cache': False,
             }
 
-        # 3. 获取并保存日线数据
+        # 3. 优先用本地日线缓存重算，避免旧的不完整缓存遮蔽已同步好的本地数据
+        result = self.calculate_seal_rate_from_cache(ts_code, trading_dates)
+        if result.get('data_complete') == 1:
+            result.update({
+                'ts_code': ts_code,
+                'trade_date': trade_date,
+                'period_days': period_days,
+                'start_date': trading_dates[0] if trading_dates else None,
+                'end_date': trading_dates[-1] if trading_dates else None,
+                'from_cache': False,
+            })
+            self.save_cached_result(ts_code, trade_date, period_days, result, trading_dates)
+            logger.info(
+                f"从本地日线重算 {ts_code} 封板率完成: 触板{result['touch_days']}天, "
+                f"封板{result['limit_up_days']}天, 封板率{result['seal_rate']}%"
+            )
+            return result
+
+        # 4. 本地日线不完整时再获取并保存日线数据
         success = self.fetch_and_save_daily_data(ts_code, trading_dates)
         if not success:
             logger.warning(f"获取日线数据失败")
 
-        # 4. 计算封板率
+        # 5. 计算封板率
         result = self.calculate_seal_rate_from_cache(ts_code, trading_dates)
 
-        # 5. 保存缓存
+        # 6. 保存缓存
         result.update({
             'ts_code': ts_code,
             'trade_date': trade_date,

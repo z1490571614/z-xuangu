@@ -22,6 +22,18 @@ def test_calculate_auction_metrics_converts_tushare_units():
     assert math.isclose(metrics["auction_turnover_rate"], 0.83, abs_tol=0.01)
 
 
+def test_calculate_auction_metrics_prefers_free_share_for_auction_turnover():
+    metrics = calculate_auction_metrics(
+        auction_vol=819000,
+        previous_daily_vol=100000,
+        float_share=9870,
+        free_share=5000,
+    )
+
+    assert metrics["auction_ratio"] == 8.19
+    assert math.isclose(metrics["auction_turnover_rate"], 1.64, abs_tol=0.01)
+
+
 def test_calculate_auction_metrics_degrades_when_denominator_missing():
     metrics = calculate_auction_metrics(
         auction_vol=819000,
@@ -47,10 +59,10 @@ def test_sync_auction_open_upserts_without_duplicate_rows(db):
                     {
                         "ts_code": "000001.SZ",
                         "trade_date": trade_date,
-                        "open": 10.5,
+                        "price": 10.5,
                         "vol": 819000,
                         "amount": 8600000,
-                        "vwap": 10.5,
+                        "pre_close": 10.0,
                     }
                 ]
             )
@@ -75,6 +87,7 @@ def test_sync_auction_open_upserts_without_duplicate_rows(db):
                         "ts_code": "000001.SZ",
                         "trade_date": trade_date,
                         "float_share": 9870,
+                        "free_share": 5000,
                     }
                 ]
             )
@@ -86,9 +99,9 @@ def test_sync_auction_open_upserts_without_duplicate_rows(db):
 
     rows = db.query(StockAuctionOpen).filter_by(trade_date="20240510", ts_code="000001.SZ").all()
     assert len(rows) == 1
-    assert rows[0].source == "tushare_stk_auction_o"
+    assert rows[0].source == "tushare_stk_auction"
     assert rows[0].auction_ratio == 8.19
-    assert math.isclose(rows[0].auction_turnover_rate, 0.83, abs_tol=0.01)
+    assert math.isclose(rows[0].auction_turnover_rate, 1.64, abs_tol=0.01)
 
 
 def test_sync_auction_open_uses_trade_date_year_calendar(db):
@@ -108,10 +121,10 @@ def test_sync_auction_open_uses_trade_date_year_calendar(db):
                     {
                         "ts_code": "000001.SZ",
                         "trade_date": trade_date,
-                        "open": 10.5,
+                        "price": 10.5,
                         "vol": 819000,
                         "amount": 8600000,
-                        "vwap": 10.5,
+                        "pre_close": 10.0,
                     }
                 ]
             )
@@ -121,7 +134,7 @@ def test_sync_auction_open_uses_trade_date_year_calendar(db):
             return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": trade_date, "vol": 100000}])
 
         def get_daily_basic(self, trade_date=None):
-            return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": trade_date, "float_share": 9870}])
+            return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": trade_date, "float_share": 9870, "free_share": 5000}])
 
     service = AuctionDataService(collector=FakeCollector(), session_factory=lambda: db)
 
@@ -147,8 +160,9 @@ def test_recalculate_auction_ratios_from_daily_cache(db):
         StockAuctionOpen(
             trade_date="20991231",
             ts_code="999001.SZ",
-            open=10.5,
+            price=10.5,
             vol=819000,
+            pre_close=10.0,
             auction_ratio=0.08,
             auction_turnover_rate=0.83,
         )
@@ -183,6 +197,45 @@ def test_daily_basic_request_includes_float_share(monkeypatch):
     collector.get_daily_basic(trade_date="20240510")
 
     assert "float_share" in captured["fields"]
+    assert "free_share" in captured["fields"]
+
+
+def test_get_stk_auction_open_uses_stk_auction_returns_raw_fields():
+    from backend.services.data_collector import TushareDataCollector
+
+    captured = {}
+
+    class FakePro:
+        def stk_auction(self, **kwargs):
+            captured.update(kwargs)
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "002929.SZ",
+                        "trade_date": "20260508",
+                        "vol": 691900,
+                        "price": 78.23,
+                        "amount": 54127337,
+                        "pre_close": 71.12,
+                        "turnover_rate": 0.326464,
+                        "volume_ratio": 3.90231,
+                        "float_share": 21193.8,
+                    }
+                ]
+            )
+
+    collector = TushareDataCollector.__new__(TushareDataCollector)
+    collector._last_pro = FakePro()
+
+    df = collector.get_stk_auction_open("20260508")
+
+    assert captured["trade_date"] == "20260508"
+    assert "price" in captured["fields"]
+    assert df.loc[0, "vol"] == 691900
+    assert df.loc[0, "price"] == 78.23
+    assert df.loc[0, "pre_close"] == 71.12
+    assert df.loc[0, "turnover_rate"] == 0.326464
+    assert "open" not in df.columns
 
 
 def test_trading_calendar_cache_is_scoped_by_year():

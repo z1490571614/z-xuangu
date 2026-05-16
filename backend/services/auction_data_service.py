@@ -32,24 +32,29 @@ def calculate_auction_metrics(
     auction_vol: Any,
     previous_daily_vol: Any,
     float_share: Any,
+    free_share: Any = None,
 ) -> Dict[str, Optional[float]]:
     """
     计算竞昨比和竞价换手率。
 
-    Tushare daily.vol 单位为手，stk_auction_o.vol 按股处理。
-    daily_basic.float_share 单位为万股。
+    Tushare daily.vol 单位为手，stk_auction.vol 按股处理。
+    auction_ratio 保持生产侧百分数口径：8.19 表示 8.19%。
+    daily_basic.float_share/free_share 单位为万股。MCP 条件使用开盘自由换手率，
+    因此优先用 free_share，缺失时降级到 float_share。
     """
     auction_vol_f = _clean_number(auction_vol)
     previous_daily_vol_f = _clean_number(previous_daily_vol)
     float_share_f = _clean_number(float_share)
+    free_share_f = _clean_number(free_share)
 
     auction_ratio = None
     if auction_vol_f is not None and previous_daily_vol_f and previous_daily_vol_f > 0:
         auction_ratio = round(auction_vol_f / previous_daily_vol_f, 2)
 
     auction_turnover_rate = None
-    if auction_vol_f is not None and float_share_f and float_share_f > 0:
-        auction_turnover_rate = round(auction_vol_f / (float_share_f * 10000) * 100, 2)
+    turnover_share_f = free_share_f if free_share_f and free_share_f > 0 else float_share_f
+    if auction_vol_f is not None and turnover_share_f and turnover_share_f > 0:
+        auction_turnover_rate = round(auction_vol_f / (turnover_share_f * 10000) * 100, 2)
 
     return {
         "auction_ratio": auction_ratio,
@@ -77,8 +82,10 @@ class AuctionDataService:
         prev_daily_df = self.collector.get_daily_data(trade_date=prev_date)
         daily_basic_df = self.collector.get_daily_basic(trade_date=trade_date)
 
-        prev_volume = self._map_by_code(prev_daily_df, "vol")
+        prev_volume_raw = self._map_by_code(prev_daily_df, "vol")
+        prev_volume = prev_volume_raw
         float_share = self._map_by_code(daily_basic_df, "float_share")
+        free_share = self._map_by_code(daily_basic_df, "free_share")
 
         db = self.session_factory()
         saved = 0
@@ -91,6 +98,7 @@ class AuctionDataService:
                     row.get("vol"),
                     prev_volume.get(ts_code),
                     float_share.get(ts_code),
+                    free_share.get(ts_code),
                 )
                 existing = db.query(StockAuctionOpen).filter(
                     StockAuctionOpen.trade_date == trade_date,
@@ -100,16 +108,13 @@ class AuctionDataService:
                     existing = StockAuctionOpen(trade_date=trade_date, ts_code=ts_code)
                     db.add(existing)
 
-                existing.open = _clean_number(row.get("open"))
-                existing.high = _clean_number(row.get("high"))
-                existing.low = _clean_number(row.get("low"))
-                existing.close = _clean_number(row.get("close"))
+                existing.price = _clean_number(row.get("price"))
                 existing.vol = _clean_number(row.get("vol"))
                 existing.amount = _clean_number(row.get("amount"))
-                existing.vwap = _clean_number(row.get("vwap"))
+                existing.pre_close = _clean_number(row.get("pre_close"))
                 existing.auction_ratio = metrics["auction_ratio"]
                 existing.auction_turnover_rate = metrics["auction_turnover_rate"]
-                existing.source = "tushare_stk_auction_o"
+                existing.source = "tushare_stk_auction"
                 existing.updated_at = datetime.now()
                 saved += 1
             db.commit()
@@ -189,7 +194,7 @@ class AuctionDataService:
                     ).count()
                     continue
                 prev_volume = {
-                    row.ts_code: row.vol
+                    row.ts_code: row.vol if row.vol is not None else None
                     for row in db.query(StockDailyData.ts_code, StockDailyData.vol)
                     .filter(StockDailyData.trade_date == prev_date)
                     .all()
@@ -245,10 +250,10 @@ class AuctionDataService:
             ).all()
             return {
                 r.ts_code: {
-                    "open": r.open,
+                    "price": r.price,
                     "auction_volume": r.vol,
                     "auction_amount": r.amount,
-                    "auction_vwap": r.vwap,
+                    "auction_pre_close": r.pre_close,
                     "auction_ratio": r.auction_ratio,
                     "auction_turnover_rate": r.auction_turnover_rate,
                     "auction_source": r.source,

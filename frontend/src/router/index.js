@@ -4,6 +4,7 @@ import StockResults from '../views/StockResults.vue'
 import TaskManage from '../views/TaskManage.vue'
 import Settings from '../views/Settings.vue'
 import StrategyManage from '../views/StrategyManage.vue'
+import ModelCenter from '../views/ModelCenter.vue'
 
 const routes = [
   {
@@ -15,6 +16,11 @@ const routes = [
     path: '/stock-results',
     name: 'StockResults',
     component: StockResults
+  },
+  {
+    path: '/models',
+    name: 'ModelCenter',
+    component: ModelCenter
   },
   {
     path: '/tasks',

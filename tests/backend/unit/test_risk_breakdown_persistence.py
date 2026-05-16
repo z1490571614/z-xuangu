@@ -1,10 +1,20 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from backend.database import Base
+from backend.database.schema_migrations import ensure_runtime_columns
 from backend.services import risk_breakdown_service
 from backend.services.risk_breakdown_service import RiskBreakdownService
-from scripts.migrate_risk_context_fields import COLUMNS, migrate
+
+
+RISK_CONTEXT_COLUMNS = {
+    "news_tips",
+    "sector_context",
+    "lhb_strength_evidence",
+    "lhb_risk_evidence",
+    "strength_evidence",
+    "risk_evidence",
+}
 
 
 def test_risk_breakdown_persists_sector_context_and_lhb_evidence(monkeypatch):
@@ -67,7 +77,7 @@ def test_risk_breakdown_persists_sector_context_and_lhb_evidence(monkeypatch):
     assert cached["risk_evidence"] == ["砸盘席位卖出：华泰成都南一环路"]
 
 
-def test_risk_context_migration_adds_missing_columns_idempotently(tmp_path):
+def test_runtime_migration_adds_missing_risk_context_columns_idempotently(tmp_path):
     db_path = tmp_path / "risk.db"
     engine = create_engine(f"sqlite:///{db_path}")
     with engine.begin() as conn:
@@ -81,8 +91,8 @@ def test_risk_context_migration_adds_missing_columns_idempotently(tmp_path):
             )
         """)
 
-    added = migrate(db_path)
-    added_again = migrate(db_path)
+    ensure_runtime_columns(engine)
+    ensure_runtime_columns(engine)
 
-    assert set(added) == set(COLUMNS)
-    assert added_again == []
+    columns = {column["name"] for column in inspect(engine).get_columns("stock_risk_breakdown")}
+    assert RISK_CONTEXT_COLUMNS.issubset(columns)

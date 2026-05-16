@@ -372,7 +372,7 @@ class TushareDataCollector:
         try:
             df = self.pro.daily_basic(
                 trade_date=trade_date,
-                fields='ts_code,trade_date,close,turnover_rate,volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv,circ_mv,float_share'
+                fields='ts_code,trade_date,close,turnover_rate,volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv,circ_mv,float_share,free_share'
             )
             logger.info(f"获取每日指标成功，共 {len(df)} 条记录")
             return df
@@ -498,14 +498,14 @@ class TushareDataCollector:
 
     def get_stk_auction_open(self, trade_date: str) -> pd.DataFrame:
         """
-        获取开盘集合竞价数据（Tushare stk_auction_o）。
+        获取开盘集合竞价数据（Tushare stk_auction）。
 
-        该接口用于历史回测和训练，实盘选股仍以 MCP 当日竞价字段为准。
+        该接口用于历史回测和训练。
         """
         try:
-            df = self.pro.stk_auction_o(
+            df = self.pro.stk_auction(
                 trade_date=trade_date,
-                fields="ts_code,trade_date,open,high,low,close,vol,amount,vwap",
+                fields="ts_code,trade_date,vol,price,amount,pre_close,turnover_rate,volume_ratio,float_share",
             )
             if df is not None and len(df) > 0:
                 logger.info(f"获取开盘集合竞价数据成功，共 {len(df)} 条记录")

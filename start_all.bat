@@ -15,7 +15,7 @@ taskkill /f /im node.exe 2>nul
 timeout /t 2 /nobreak >nul
 
 echo [1/2] Starting backend...
-start "xuangu-backend" cmd /k "conda activate xuangu && uvicorn backend.main:app --host 127.0.0.1 --port 9999 --workers 1"
+start "xuangu-backend" cmd /k "call conda activate xuangu && python -m uvicorn backend.main:app --host 127.0.0.1 --port 9999 --workers 1"
 timeout /t 5 /nobreak >nul
 
 echo [2/2] Starting frontend...

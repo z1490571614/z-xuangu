@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import pandas as pd
 
 from backend.database import SessionLocal
+from backend.models import StockFeatureSnapshot
 from backend.models.auction_backtest import LeaderMainT0TrainingSample, StockAuctionOpen
 from backend.services.data_collector import TushareDataCollector
 from backend.services.scoring.rule_score_service import RuleScoreService
@@ -21,12 +22,16 @@ DEFAULT_CONFIG = {
     "max_prev_close": 500,
     "min_rise_10d_pct": 0,
     "min_limit_up_count_100d": 3,
-    "min_limit_up_streak": 2,
-    "max_market_height_rank": 10,
-    "min_turnover_rate": 3,
-    "min_chinext_turnover_rate": 5,
-    "min_sector_change_pct": 2,
-    "min_sector_limit_up_count": 3,
+    "min_seal_rate_100d": 80,
+    "min_open_change_pct": -3,
+    "min_limit_up_streak": None,
+    "max_market_height_rank": None,
+    "min_turnover_rate": None,
+    "min_chinext_turnover_rate": None,
+    "require_prev_day_volume_ge_prev2": False,
+    "require_ma5_gt_ma10": False,
+    "min_sector_change_pct": None,
+    "min_sector_limit_up_count": None,
     "min_auction_ratio": 4,
     "max_auction_ratio": 30,
     "min_auction_turnover_rate": 0.5,
@@ -43,6 +48,16 @@ def _num(value: Any, default: Optional[float] = None) -> Optional[float]:
         return default
 
 
+def normalize_auction_ratio_percent(value: Any) -> Optional[float]:
+    """Return auction_ratio as percentage points: 8.19 means 8.19%."""
+    ratio = _num(value)
+    if ratio is None:
+        return None
+    if 0 < ratio < 1:
+        return round(ratio * 100, 4)
+    return ratio
+
+
 def _is_chinext_or_star(ts_code: str) -> bool:
     code = (ts_code or "").split(".")[0]
     return code.startswith(("300", "301", "688", "689"))
@@ -51,11 +66,6 @@ def _is_chinext_or_star(ts_code: str) -> bool:
 def _reject_reasons(feature: Dict[str, Any], config: Dict[str, Any]) -> List[str]:
     reasons: List[str] = []
     ts_code = feature.get("ts_code", "")
-    turnover_min = (
-        config["min_chinext_turnover_rate"]
-        if _is_chinext_or_star(ts_code)
-        else config["min_turnover_rate"]
-    )
 
     checks = [
         (feature.get("is_st"), "ST股票"),
@@ -65,17 +75,49 @@ def _reject_reasons(feature: Dict[str, Any], config: Dict[str, Any]) -> List[str
         (_num(feature.get("prev_close"), 0) >= config["max_prev_close"], "T-1收盘价不小于500"),
         (_num(feature.get("rise_10d_pct"), -999) <= config["min_rise_10d_pct"], "近10日股价未上涨"),
         (_num(feature.get("limit_up_count_100d"), 0) < config["min_limit_up_count_100d"], "100日涨停次数不足"),
-        (_num(feature.get("limit_up_streak"), 0) < config["min_limit_up_streak"], "T-1连板高度不足"),
-        (_num(feature.get("market_height_rank"), 999) > config["max_market_height_rank"], "市场高度排名不在前10"),
-        (_num(feature.get("yesterday_turnover_rate"), 0) < turnover_min, "T-1真实换手不足"),
-        (not bool(feature.get("prev_day_volume_ge_prev2")), "T-1涨停日成交量小于T-2"),
-        (not bool(feature.get("ma5_gt_ma10")), "均线趋势不满足MA5>=MA10"),
-        (_num(feature.get("sector_change_pct"), 0) < config["min_sector_change_pct"], "板块涨幅不足2%"),
-        (_num(feature.get("sector_limit_up_count"), 0) < config["min_sector_limit_up_count"], "板块涨停数不足3"),
     ]
     reasons.extend(reason for failed, reason in checks if failed)
 
-    auction_ratio = _num(feature.get("auction_ratio"))
+    min_seal_rate = config.get("min_seal_rate_100d")
+    if min_seal_rate is not None and _num(feature.get("seal_rate_100d"), -1) < min_seal_rate:
+        reasons.append(f"封板率低于{min_seal_rate:g}%")
+
+    min_open_change_pct = config.get("min_open_change_pct")
+    open_change_pct = _num(feature.get("open_change_pct"))
+    if min_open_change_pct is not None and open_change_pct is not None and open_change_pct < min_open_change_pct:
+        reasons.append(f"开盘跌幅低于{min_open_change_pct:g}%")
+
+    min_limit_up_streak = config.get("min_limit_up_streak")
+    if min_limit_up_streak is not None and _num(feature.get("limit_up_streak"), 0) < min_limit_up_streak:
+        reasons.append("T-1连板高度不足")
+
+    max_market_height_rank = config.get("max_market_height_rank")
+    if max_market_height_rank is not None and _num(feature.get("market_height_rank"), 999) > max_market_height_rank:
+        reasons.append("市场高度排名不在前10")
+
+    turnover_min = (
+        config.get("min_chinext_turnover_rate")
+        if _is_chinext_or_star(ts_code)
+        else config.get("min_turnover_rate")
+    )
+    if turnover_min is not None and _num(feature.get("yesterday_turnover_rate"), 0) < turnover_min:
+        reasons.append("T-1真实换手不足")
+
+    if config.get("require_prev_day_volume_ge_prev2") and not bool(feature.get("prev_day_volume_ge_prev2")):
+        reasons.append("T-1涨停日成交量小于T-2")
+
+    if config.get("require_ma5_gt_ma10") and not bool(feature.get("ma5_gt_ma10")):
+        reasons.append("均线趋势不满足MA5>=MA10")
+
+    min_sector_change_pct = config.get("min_sector_change_pct")
+    if min_sector_change_pct is not None and _num(feature.get("sector_change_pct"), 0) < min_sector_change_pct:
+        reasons.append("板块涨幅不足2%")
+
+    min_sector_limit_up_count = config.get("min_sector_limit_up_count")
+    if min_sector_limit_up_count is not None and _num(feature.get("sector_limit_up_count"), 0) < min_sector_limit_up_count:
+        reasons.append("板块涨停数不足3")
+
+    auction_ratio = normalize_auction_ratio_percent(feature.get("auction_ratio"))
     if auction_ratio is None or not (config["min_auction_ratio"] <= auction_ratio <= config["max_auction_ratio"]):
         reasons.append("竞昨比不在4%-30%")
 
@@ -128,6 +170,10 @@ class LeaderMainT0FeatureBuilder:
         """
         db = self.session_factory()
         try:
+            snapshot_features = self._build_features_from_feature_snapshots(db, trade_date)
+            if snapshot_features:
+                return snapshot_features
+
             auctions = db.query(StockAuctionOpen).filter(StockAuctionOpen.trade_date == trade_date).all()
             if not auctions:
                 return []
@@ -140,6 +186,9 @@ class LeaderMainT0FeatureBuilder:
             daily_df = self._fetch_daily_history(history_days)
             if daily_df is None or daily_df.empty:
                 return []
+
+            trade_daily_df = self.collector.get_daily_data(trade_date=trade_date)
+            trade_daily_map = self._map_by_code(trade_daily_df) if trade_daily_df is not None else {}
 
             prev_basic_df = self.collector.get_daily_basic(trade_date=prev_date)
             stock_basic_df = self.collector.get_stock_basic()
@@ -163,16 +212,19 @@ class LeaderMainT0FeatureBuilder:
                 basic = prev_basic_map.get(auction.ts_code, {})
                 stock_basic = stock_basic_map.get(auction.ts_code, {})
                 limit_count_100d = self._limit_up_count(rows[-101:] if len(rows) > 101 else rows)
+                seal_rate_100d = self._seal_rate(rows[-101:] if len(rows) > 101 else rows)
                 rise_5d_pct = self._rise_pct(rows, 5)
                 rise_10d_pct = self._rise_pct(rows, 10)
                 ma5 = self._ma(rows, 5)
                 ma10 = self._ma(rows, 10)
+                trade_daily_row = trade_daily_map.get(auction.ts_code, {})
+                daily_open = _num(trade_daily_row.get("open"))
+                daily_pre_close = _num(trade_daily_row.get("pre_close"))
                 open_change_pct = None
-                if auction.open is not None and prev_close and prev_close > 0:
-                    open_change_pct = round((auction.open - prev_close) / prev_close * 100, 2)
+                if daily_open and daily_pre_close and daily_pre_close > 0:
+                    open_change_pct = round((daily_open - daily_pre_close) / daily_pre_close * 100, 2)
+
                 auction_vwap_gap_pct = None
-                if auction.vwap is not None and auction.open and auction.open > 0:
-                    auction_vwap_gap_pct = round((auction.vwap - auction.open) / auction.open * 100, 2)
 
                 feature = {
                     "trade_date": trade_date,
@@ -185,7 +237,7 @@ class LeaderMainT0FeatureBuilder:
                     "prev_close": prev_close,
                     "pre_change_pct": _num(prev_row.get("pct_chg")),
                     "open_change_pct": open_change_pct,
-                    "auction_ratio": auction.auction_ratio,
+                    "auction_ratio": normalize_auction_ratio_percent(auction.auction_ratio),
                     "auction_turnover_rate": auction.auction_turnover_rate,
                     "auction_amount": auction.amount,
                     "auction_volume": auction.vol,
@@ -194,7 +246,7 @@ class LeaderMainT0FeatureBuilder:
                     "limit_up_streak": streaks.get(auction.ts_code, 0),
                     "market_height_rank": rank_by_code.get(auction.ts_code, 999),
                     "limit_up_count_100d": limit_count_100d,
-                    "seal_rate_100d": None,
+                    "seal_rate_100d": seal_rate_100d,
                     "rise_5d_pct": rise_5d_pct,
                     "rise_10d_pct": rise_10d_pct,
                     "yesterday_turnover_rate": _num(basic.get("turnover_rate")),
@@ -224,11 +276,76 @@ class LeaderMainT0FeatureBuilder:
             if self._owns_session:
                 db.close()
 
+    def _build_features_from_feature_snapshots(self, db, trade_date: str) -> List[Dict[str, Any]]:
+        snapshots = (
+            db.query(StockFeatureSnapshot)
+            .filter(StockFeatureSnapshot.trade_date == trade_date)
+            .order_by(StockFeatureSnapshot.id.asc())
+            .all()
+        )
+        if not snapshots:
+            return []
+
+        features = [self._feature_from_snapshot(row) for row in snapshots]
+        return filter_leader_main_t0_candidates(features)["candidates"]
+
+    @staticmethod
+    def _feature_from_snapshot(row: StockFeatureSnapshot) -> Dict[str, Any]:
+        feature = {
+            "trade_date": row.trade_date,
+            "ts_code": row.ts_code,
+            "name": row.name,
+            "source": "stock_feature_snapshot",
+            "is_st": "ST" in str(row.name or ""),
+            "is_suspended": False,
+            "is_bj": (row.ts_code or "").endswith(".BJ"),
+            "circ_mv": row.circ_mv,
+            "prev_close": None,
+            "pre_change_pct": row.pre_change_pct,
+            "open_change_pct": row.open_change_pct,
+            "auction_ratio": normalize_auction_ratio_percent(row.auction_ratio),
+            "auction_turnover_rate": row.auction_turnover_rate,
+            "auction_amount": None,
+            "auction_volume": row.auction_volume,
+            "auction_amount_to_circ_mv": None,
+            "auction_vwap_gap_pct": None,
+            "limit_up_streak": None,
+            "market_height_rank": None,
+            "limit_up_count_100d": row.limit_up_count_100d,
+            "seal_rate_100d": row.seal_rate_100d,
+            "rise_5d_pct": None,
+            "rise_10d_pct": row.rise_10d_pct,
+            "yesterday_turnover_rate": None,
+            "yesterday_amount": None,
+            "yesterday_volume_ratio": None,
+            "ma5_gap_pct": None,
+            "ma10_gap_pct": None,
+            "ma5_gt_ma10": None,
+            "prev_day_volume_ge_prev2": None,
+            "sector_change_pct": row.sector_avg_pct,
+            "sector_limit_up_count": None,
+            "feature_missing_flags": ["snapshot_optional_fields"],
+        }
+        feature["rule_score"] = score_candidate_rule(feature)
+        return feature
+
     def save_training_samples(self, trade_date: str, features: List[Dict[str, Any]]) -> int:
         db = self.session_factory()
         saved = 0
         try:
+            feature_codes = {
+                feature.get("ts_code")
+                for feature in features
+                if feature.get("ts_code")
+            }
+            sync_snapshot_source = bool(feature_codes) and all(
+                feature.get("source") == "stock_feature_snapshot"
+                for feature in features
+            )
+
             for feature in features:
+                feature = dict(feature)
+                feature["auction_ratio"] = normalize_auction_ratio_percent(feature.get("auction_ratio"))
                 ts_code = feature.get("ts_code")
                 if not ts_code:
                     continue
@@ -248,6 +365,13 @@ class LeaderMainT0FeatureBuilder:
                 existing.feature_json = json.dumps(feature, ensure_ascii=False)
                 existing.updated_at = datetime.now()
                 saved += 1
+
+            if sync_snapshot_source:
+                db.query(LeaderMainT0TrainingSample).filter(
+                    LeaderMainT0TrainingSample.trade_date == trade_date,
+                    LeaderMainT0TrainingSample.strategy_version == "leader_main_t0",
+                    LeaderMainT0TrainingSample.ts_code.notin_(feature_codes),
+                ).delete(synchronize_session=False)
             db.commit()
             return saved
         except Exception:
@@ -276,7 +400,7 @@ class LeaderMainT0FeatureBuilder:
         sample.rise_10d_pct = feature.get("rise_10d_pct")
         sample.pre_change_pct = feature.get("pre_change_pct")
         sample.open_change_pct = feature.get("open_change_pct")
-        sample.auction_ratio = feature.get("auction_ratio")
+        sample.auction_ratio = normalize_auction_ratio_percent(feature.get("auction_ratio"))
         sample.auction_turnover_rate = feature.get("auction_turnover_rate")
         sample.auction_amount = feature.get("auction_amount")
         sample.auction_vwap_gap_pct = feature.get("auction_vwap_gap_pct")
@@ -335,6 +459,15 @@ class LeaderMainT0FeatureBuilder:
     def _limit_up_count(self, rows: List[Dict[str, Any]]) -> int:
         return sum(1 for row in rows if self._is_limit_up(row.get("ts_code", ""), row))
 
+    def _touch_limit_count(self, rows: List[Dict[str, Any]]) -> int:
+        return sum(1 for row in rows if self._is_touch_limit(row.get("ts_code", ""), row))
+
+    def _seal_rate(self, rows: List[Dict[str, Any]]) -> Optional[float]:
+        touch_count = self._touch_limit_count(rows)
+        if touch_count <= 0:
+            return None
+        return round(self._limit_up_count(rows) / touch_count * 100, 2)
+
     def _limit_up_streak(self, rows: List[Dict[str, Any]]) -> int:
         streak = 0
         for row in reversed(rows):
@@ -343,6 +476,14 @@ class LeaderMainT0FeatureBuilder:
             else:
                 break
         return streak
+
+    @staticmethod
+    def _is_touch_limit(ts_code: str, row: Dict[str, Any]) -> bool:
+        pre_close = _num(row.get("pre_close"))
+        high = _num(row.get("high"))
+        if not pre_close or pre_close <= 0 or high is None:
+            return False
+        return high >= calculate_limit_up_price(ts_code, pre_close) * 0.997
 
     @staticmethod
     def _market_height_rank(streaks: Dict[str, int]) -> Dict[str, int]:
@@ -395,7 +536,7 @@ def score_candidate_rule(feature: Dict[str, Any]) -> float:
         rise_10d_pct=feature.get("rise_10d_pct"),
         pre_change_pct=feature.get("pre_change_pct"),
         open_change_pct=feature.get("open_change_pct"),
-        auction_ratio=feature.get("auction_ratio"),
+        auction_ratio=normalize_auction_ratio_percent(feature.get("auction_ratio")),
         auction_turnover_rate=feature.get("auction_turnover_rate"),
         circ_mv=feature.get("circ_mv"),
     )

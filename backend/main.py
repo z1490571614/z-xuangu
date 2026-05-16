@@ -22,7 +22,7 @@ setup_logging(
     log_level=os.getenv("LOG_LEVEL", "INFO"),
 )
 
-from backend.api import stock, task, config, strategy, stock_detail, score_v2, anomaly, overview_brief, news_v2, backtest
+from backend.api import stock, task, config, strategy, stock_detail, score_v2, anomaly, overview_brief, news_v2, backtest, model_management
 from backend.auth import routes as auth_routes
 from backend.database import engine, Base
 from backend.models.stock_lhb import StockLhb
@@ -259,6 +259,7 @@ app.include_router(anomaly.router)
 app.include_router(overview_brief.router)
 app.include_router(news_v2.router)
 app.include_router(backtest.router, prefix="/api/v1")
+app.include_router(model_management.router, prefix="/api/v1")
 app.include_router(auth_routes.router)
 
 from backend.services.websocket_service import websocket_endpoint, get_connection_stats
@@ -272,9 +273,11 @@ async def model_status():
     from backend.database import SessionLocal
     from backend.models import ModelVersion
 
-    model_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', 'models', 'active_auction_lgbm.pkl')
-    exists = _os.path.exists(model_path)
+    legacy_model_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', 'models', 'active_auction_lgbm.pkl')
+    legacy_exists = _os.path.exists(legacy_model_path)
     models = {}
+    enabled = legacy_exists
+    active_model_path = legacy_model_path if legacy_exists else None
     db = SessionLocal()
     try:
         active_versions = db.query(ModelVersion).filter(ModelVersion.is_active == 1).all()
@@ -287,9 +290,15 @@ async def model_status():
                 metrics = _json.loads(mv.model_metrics) if mv.model_metrics else {}
             except Exception:
                 metrics = {}
+            model_exists = bool(mv.model_path and _os.path.exists(mv.model_path))
+            if model_exists:
+                enabled = True
+                if active_model_path is None or mv.model_name == "leader_main_t0_lgbm":
+                    active_model_path = mv.model_path
             models[mv.model_name] = {
                 "version": mv.version,
                 "model_path": mv.model_path,
+                "available": model_exists,
                 "feature_cols": feature_cols,
                 "metrics": metrics,
                 "train_start_date": mv.train_start_date,
@@ -302,8 +311,8 @@ async def model_status():
         "code": 200,
         "message": "success",
         "data": {
-            "enabled": exists,
-            "model_path": model_path if exists else None,
+            "enabled": enabled,
+            "model_path": active_model_path,
             "models": models,
         }
     }

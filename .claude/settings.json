@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/backend/unit/ --tb=line -q)",
+      "Bash(python -m pytest tests/backend/unit/test_tdx_local_daily.py::test_sync_local_daily_upserts_to_stock_daily_data -v --tb=short)",
+      "Bash(python -m pytest tests/backend/unit/test_tdx_local_daily.py -v --tb=short)",
+      "Bash(python -c ' *)",
+      "Bash(.venv/Scripts/pip install *)"
+    ]
+  }
+}

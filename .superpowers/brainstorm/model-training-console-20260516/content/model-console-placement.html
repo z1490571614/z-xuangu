@@ -1,0 +1,71 @@
+<h2>模型管理与训练台放在哪里？</h2>
+<p class="subtitle">先确定入口和工作区位置。这个模块会承载模型选择、刷新预测、训练参数、实时进度、胜率测试和自动重训策略。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">选股结果页顶部增强</div>
+        <div class="mockup-body">
+          <div class="mock-nav">选股结果 | 模型：leader_main_t0_lgbm ▼ | 刷新预测</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:12px 0">
+            <div class="placeholder">AUC / 胜率</div>
+            <div class="placeholder">当前 active 版本</div>
+            <div class="placeholder">阈值命中统计</div>
+          </div>
+          <div class="placeholder" style="height:90px">股票明细表继续在下方展示</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 结果页内嵌</h3>
+      <p>最短路径，适合“换模型后立即刷新当前选股记录”。但训练参数和进度会挤占结果页。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">新增：模型中心</div>
+        <div class="mockup-body">
+          <div class="mock-nav">仪表盘 | 选股结果 | 任务管理 | 模型中心</div>
+          <div style="display:flex;gap:12px;margin-top:12px">
+            <div class="mock-sidebar" style="width:160px">模型列表<br>版本列表<br>训练任务<br>评估记录</div>
+            <div class="mock-content" style="flex:1">
+              <div class="placeholder">模型选择 + active 切换 + 刷新预测</div>
+              <div class="placeholder">训练参数表单 / 测试训练 / 正式训练</div>
+              <div class="placeholder">实时进度条 + 日志 + 胜率门槛</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 独立模型中心</h3>
+      <p>信息最清楚，适合后续扩展多个模型、版本管理、训练历史和自动重训。我更推荐这个。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">训练向导弹窗</div>
+        <div class="mockup-body">
+          <div class="placeholder">步骤 1：选模型和样本区间</div>
+          <div class="placeholder">步骤 2：调参数并测试</div>
+          <div class="placeholder">步骤 3：正式训练 + 胜率验收</div>
+          <div class="placeholder">步骤 4：通过后设为 active</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 弹窗训练向导</h3>
+      <p>流程感强，适合降低误操作；但模型选择、历史评估和训练任务列表仍需要另一个承载位置。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">建议</div>
+  <p>采用 B 作为主入口，结果页只保留轻量模型选择与“刷新当前记录预测”。训练用模型中心里的向导式区域承载。</p>
+</div>

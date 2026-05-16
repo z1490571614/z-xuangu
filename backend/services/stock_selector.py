@@ -596,24 +596,33 @@ class StockSelectorService:
         # LightGBM模型预测（批量添加model_score）
         try:
             merged = batch_predict_before_selection(merged)
-            for s in merged:
-                model_score = s.get("model_score")
-                if model_score is not None:
-                    s["final_score"] = round(s.get("rule_score", 0) * 0.6 + model_score * 0.4, 2)
-                else:
-                    s["final_score"] = round(s.get("rule_score", 0), 2)
         except Exception as e:
             logger.warning(f"LightGBM预测失败: {e}")
-            for s in merged:
-                s["final_score"] = round(s.get("rule_score", 0), 2)
 
-        # 龙头主升 T+0 成功率模型只做展示/排序参考，不覆盖 final_score。
+        # 龙头主升 T+0 成功率模型预测
         try:
             merged = batch_predict_leader_main_t0(merged)
         except Exception as e:
             logger.warning(f"龙头主升T+0模型预测失败: {e}")
             for s in merged:
                 s["t0_limit_success_prob"] = None
+
+        # 综合评分: rule_score(55%) + model_score(35%) + t0_prob(10%)
+        for s in merged:
+            rule_score = s.get("rule_score", 0) or 0
+            model_score = s.get("model_score")
+            t0_prob = s.get("t0_limit_success_prob")
+            weights = 0
+            total = 0.0
+            total += rule_score * 0.55
+            weights += 0.55
+            if model_score is not None:
+                total += model_score * 0.35
+                weights += 0.35
+            if t0_prob is not None:
+                total += t0_prob * 0.10
+                weights += 0.10
+            s["final_score"] = round(total / weights, 2) if weights > 0 else 0
 
         return merged
 

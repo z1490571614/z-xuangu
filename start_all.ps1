@@ -11,8 +11,7 @@ Write-Host "[1/2] 启动后端服务..." -ForegroundColor Yellow
 $backendJob = Start-Job -ScriptBlock {
     param($dir, $port)
     Set-Location $dir
-    conda activate xuangu
-    uvicorn backend.main:app --host 127.0.0.1 --port $port --workers 1 --log-level info
+    conda run -n xuangu python -m uvicorn backend.main:app --host 127.0.0.1 --port $port --workers 1 --log-level info
 } -ArgumentList $root, $backendPort
 
 Start-Sleep -Seconds 5

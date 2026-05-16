@@ -77,6 +77,9 @@
             <span class="preload-spinner"></span>
             预加载中 {{ preloadCount }}/{{ stocks.length }}
           </div>
+          <button class="btn-clear-cache" :disabled="!currentRecordId" @click="goModelCenter">
+            刷新模型预测
+          </button>
           <button v-if="!preloading" class="btn-clear-cache" @click="clearAllCache">
             清空缓存
           </button>
@@ -109,6 +112,12 @@
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
+              <th @click="sortBy('t0_limit_success_prob')" class="sortable lightgbm-col">
+                LightGBM
+                <span v-if="sortField === 't0_limit_success_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
               <th @click="sortBy('leader_strength_score')" class="sortable">
                 强度
                 <span v-if="sortField === 'leader_strength_score'" class="sort-icon">
@@ -119,12 +128,6 @@
               <th>入选原因</th>
               <th>竞昨比</th>
               <th>竞价换手率</th>
-              <th @click="sortBy('t0_limit_success_prob')" class="sortable">
-                T+0成功率
-                <span v-if="sortField === 't0_limit_success_prob'" class="sort-icon">
-                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
-                </span>
-              </th>
               <th>触板</th>
               <th>封板</th>
               <th>封成比</th>
@@ -153,6 +156,10 @@
                 <span v-if="stock.leader_level" :class="'level-tag ' + stock.leader_level">{{ stock.leader_level }}</span>
                 <span v-else class="muted">{{ stock.final_score != null ? stock.final_score.toFixed(1) : '--' }}</span>
               </td>
+              <td class="num-cell model-prob lightgbm-prob" :title="lightGbmTitle(stock)">
+                <span class="model-label">T0</span>
+                <span>{{ formatPct(stock.t0_limit_success_prob) }}</span>
+              </td>
               <td class="num-cell">{{ stock.leader_strength_score ?? '--' }}</td>
               <td class="num-cell">{{ stock.retreat_risk_score ?? '--' }}</td>
               <td class="reasons-cell">
@@ -161,9 +168,6 @@
               </td>
               <td class="num-cell">{{ formatPct(stock.auction_ratio) }}</td>
               <td class="num-cell">{{ formatPct(stock.auction_turnover_rate) }}</td>
-              <td class="num-cell model-prob" :title="stock.t0_limit_success_model_version || '未启用模型'">
-                {{ formatPct(stock.t0_limit_success_prob) }}
-              </td>
               <td class="num-cell">{{ stock.touch_days || '--' }}</td>
               <td class="num-cell highlight">{{ stock.limit_up_days || stock.limit_up_count || '--' }}</td>
               <td class="num-cell">{{ formatPct(stock.seal_rate) }}</td>
@@ -217,11 +221,13 @@
 
 <script setup>
 import { ref, onMounted, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import axios from 'axios'
 import StockDetailModal from './StockDetailModal.vue'
 import { stockPreloadService } from '../services/StockPreloadService'
 
 const records = ref([])
+const router = useRouter()
 const stocks = ref([])
 const loading = ref(false)
 const currentPage = ref(1)
@@ -315,6 +321,11 @@ async function loadStocks(recordId) {
     stocks.value = []
     t0ModelDisclaimer.value = ''
   }
+}
+
+function goModelCenter() {
+  if (!currentRecordId.value) return
+  router.push(`/models?record_id=${currentRecordId.value}`)
 }
 
 async function startPreload(stocksList) {
@@ -451,6 +462,11 @@ function statusText(s) {
 function formatNum(v) { return v != null ? Number(v).toFixed(2) : '--' }
 function formatPct(v) { return v != null ? Number(v).toFixed(2) + '%' : '--' }
 function formatTime(t) { if (!t) return '--'; return t.replace('T', ' ').substring(0, 19) }
+
+function lightGbmTitle(stock) {
+  const version = stock.t0_limit_success_model_version || '未启用模型'
+  return `LightGBM T+0封板概率模型：${version}`
+}
 
 function fmtRate(v) {
   if (v == null) return '--'
@@ -618,6 +634,22 @@ function isLimitUp(stock) {
 .num-cell.muted { color: #bbb; }
 .num-cell.highlight { color: #ff4d4f; font-weight: 700; }
 .num-cell.score-cell { color: #667eea; font-weight: 700; }
+.lightgbm-col { min-width: 88px; }
+.lightgbm-prob {
+  color: #08979c;
+  font-weight: 700;
+}
+.model-label {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #e6fffb;
+  color: #08979c;
+  font-size: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  vertical-align: 1px;
+}
 
 .level-badge {
   display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 700;

@@ -167,6 +167,9 @@ def test_get_daily_data_falls_back_to_tushare_when_local_empty():
 
 def test_sync_local_daily_upserts_to_stock_daily_data(tmp_path, db):
     Base.metadata.create_all(bind=engine)
+    # 清理其他测试遗留的已提交数据，确保本测试数据隔离
+    db.query(StockDailyData).filter(StockDailyData.ts_code == "000001.SZ").delete()
+    db.commit()
     day_path = tmp_path / "sz" / "lday" / "sz000001.day"
     _write_day_file(
         day_path,

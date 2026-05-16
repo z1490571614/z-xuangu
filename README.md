@@ -38,6 +38,8 @@
 | **开盘预案生成** | 6种开盘场景、具体观察点、取消条件、止损止盈 | ✅ |
 | **封板率计算** | 基于前复权数据计算触板天数、封板天数、封板率 | ✅ |
 | **候选股特征快照** | 每日保存候选股特征,支持LightGBM训练样本沉淀 | ✅ |
+| **LightGBM竞价模型** | 双模型架构(竞价通用+龙头T+0),13维特征,自动训练+批量预测+版本管理 | ✅ |
+| **竞价回测管线** | 集合竞价数据同步→特征构建→标签生成→模型训练→预测的完整T+0回测管线 | ✅ |
 | **WebSocket实时推送** | 替代轮询,支持频道订阅和消息广播 | ✅ |
 | **飞书通知** | 自动推送选股结果(含评分/原因/风险标签)和告警到飞书群 | ✅ |
 | **定时任务** | 支持定时自动执行选股任务 | ✅ |
@@ -69,7 +71,7 @@
 | 通达信MCP | - | 阶段1选股 |
 | Tushare Pro | - | 阶段2分析 + 阶段3封板率 + 龙虎榜 + 资金流向 + 筹码数据 + 板块行情 |
 | 通达信行情API | - | 实时行情/竞价数据 |
-| LightGBM | 可选 | 模型评分训练与预测 |
+| LightGBM | 3.3+ | 竞价选股模型训练与T+0封板概率预测 |
 | OpenAI/Doubao API | - | AI综合概览生成 |
 | DeepSeek API | - | AI综合分析 |
 
@@ -192,6 +194,20 @@ python test_detail_page.py
 |------|------|------|
 | GET | `/api/v1/stock/detail/risk?strategy_type=dragon_leader` | 龙头战法评分(龙头强度+退潮风险+综合健康度) |
 
+#### 模型与回测
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/model/status` | 获取所有活跃模型版本、特征列、评估指标 |
+| POST | `/api/v1/backtest/leader-main-t0/run` | 一键执行T+0回测管线(竞价同步→特征→标签→训练) |
+| POST | `/api/v1/backtest/leader-main-t0/build` | 构建候选股训练样本 |
+| POST | `/api/v1/backtest/leader-main-t0/labels` | 生成T+0涨停标签 |
+| POST | `/api/v1/backtest/leader-main-t0/train` | 训练龙头T+0 LightGBM模型 |
+| GET | `/api/v1/backtest/leader-main-t0/samples` | 分页查询训练样本(含标签) |
+| POST | `/api/v1/backtest/auction/sync` | 同步单日集合竞价数据 |
+| POST | `/api/v1/backtest/auction/sync-range` | 同步日期区间集合竞价数据 |
+| POST | `/api/v1/backtest/tdx-local-daily/sync` | 同步通达信本地日线数据 |
+
 ---
 
 ## 选股架构
@@ -287,6 +303,26 @@ python test_detail_page.py
 | 70-79 | B |
 | 60-69 | C |
 | <60 | D |
+
+### LightGBM竞价模型（双模型架构）
+
+系统包含两套LightGBM模型，服务不同场景：
+
+| 模型 | 模型名 | 特征数 | 用途 | 影响评分 |
+|------|--------|--------|------|----------|
+| 竞价通用模型 | `active_auction_lgbm` | 8维 | 竞价活跃度+封板率+趋势综合评分 | ✅ `final_score` 中占40%权重 |
+| 龙头T+0模型 | `leader_main_t0_lgbm` | 13维 | 龙头股T+0封板概率预测 | ❌ 仅展示排序参考 |
+
+**龙头T+0模型特征（13维）**:
+`limit_up_streak`(连板数), `market_height_rank`(市场身位排名), `limit_up_count_100d`, `seal_rate_100d`, `rise_5d_pct`, `rise_10d_pct`, `pre_change_pct`, `open_change_pct`, `auction_ratio`(竞昨比), `auction_turnover_rate`(竞价换手率), `circ_mv`(流通市值), `sector_change_pct`(板块涨跌), `sector_limit_up_count`(板块涨停家数)
+
+**T+0标签定义**: 非一字板 + 最高价触及涨停价 + 收盘封死涨停 → `label=1`(成功)；一字板(开/高/低/收全部接近涨停价) → `label=None`(排除出训练集)
+
+**训练管线**: 集合竞价数据同步 → 日线数据同步 → 竞昨比重算 → 候选股特征构建(13维+规则过滤) → T+0标签生成 → 模型训练(70/20/10分割+9阈值评估) → 版本化持久化 → 批量预测集成至选股管线
+
+**模型管理**: 每次训练自动版本化(`leader_main_t0_lgbm_{version}.pkl`)，DB记录特征列/评估指标/训练日期区间，`is_active`标记活跃版本，`/api/v1/model/status` 可查询所有活跃模型状态
+
+**降级策略**: 模型文件缺失或 `joblib` 不可用时，`t0_limit_success_prob` 返回 `None`，不影响核心选股流程，规则评分独立运行
 
 ---
 
@@ -392,7 +428,8 @@ pytest tests/ -v --cov=backend
 │   │   ├── stock_ths_board.py           # 同花顺板块
 │   │   ├── anomaly_interpretation.py    # 异动解读
 │   │   ├── overview_brief.py            # AI综合概览
-│   │   ├── selected_stock.py            # 选股结果
+│   │   ├── selected_stock.py            # 选股结果(含t0_limit_success_prob)
+│   │   ├── auction_backtest.py          # 竞价回测样本+训练样本ORM
 │   │   └── scoring_v2/                  # 评分V3模型
 │   ├── services/                         # 业务逻辑
 │   │   ├── lhb_service.py              # 龙虎榜服务
@@ -431,6 +468,11 @@ pytest tests/ -v --cov=backend
 │   │   ├── ai_brief/                    # AI综合概览服务
 │   │   ├── stock_selector.py           # 四阶段选股协调
 │   │   ├── scoring_v2/                 # 评分V3服务
+│   │   ├── model_engine/               # LightGBM模型引擎
+│   │   │   └── lightgbm_service.py    # 训练+预测+版本管理+双模型
+│   │   ├── backtest/                   # 回测管线
+│   │   │   ├── leader_main_t0_feature_builder.py  # 特征构建+候选过滤
+│   │   │   └── leader_main_t0_label_builder.py    # T+0标签生成
 │   │   └── strategy/                   # 策略服务
 │   └── utils/
 │       └── trading_date.py            # 交易日工具
@@ -451,15 +493,22 @@ pytest tests/ -v --cov=backend
 │   └── migrate_risk_context_fields.py  # 风险上下文字段迁移
 │
 ├── tests/                               # 测试
-│   └── backend/unit/
-│       ├── test_dragon_leader.py        # 龙头战法评分测试
-│       ├── test_dragon_leader_e2e.py    # 龙头战法端到端测试
-│       ├── test_dc_board_service.py     # 东财板块服务测试
-│       ├── test_dc_board_alias_service.py  # 板块别名服务测试
-│       ├── test_dc_board_alias_generation.py # 板块别名生成测试
-│       ├── test_lhb_seat_effectiveness.py   # 席位有效性测试
-│       ├── test_risk_breakdown_persistence.py # 风险拆解持久化测试
-│       └── ...                         # 其他测试
+│   ├── backend/unit/
+│   │   ├── test_leader_main_t0_lightgbm.py  # LightGBM训练/预测测试
+│   │   ├── test_leader_main_t0_feature_builder.py # 特征构建测试
+│   │   ├── test_leader_main_t0_label_builder.py  # 标签生成测试
+│   │   ├── test_model_status_api.py      # 模型状态API测试
+│   │   ├── test_stock_api_t0_model_fields.py  # T+0字段API测试
+│   │   ├── test_dragon_leader.py         # 龙头战法评分测试
+│   │   ├── test_dragon_leader_e2e.py     # 龙头战法端到端测试
+│   │   ├── test_dc_board_service.py      # 东财板块服务测试
+│   │   ├── test_dc_board_alias_service.py   # 板块别名服务测试
+│   │   ├── test_dc_board_alias_generation.py # 板块别名生成测试
+│   │   ├── test_lhb_seat_effectiveness.py    # 席位有效性测试
+│   │   ├── test_risk_breakdown_persistence.py # 风险拆解持久化测试
+│   │   └── ...                           # 其他测试
+│   └── frontend/e2e/
+│       └── lightgbm-results.spec.js      # LightGBM结果页e2e测试
 │
 ├── AGENTS.md                            # 架构文档
 ├── CLAUDE.md                            # 开发指南
@@ -481,6 +530,10 @@ pytest tests/ -v --cov=backend
 | 龙头战法评分 | <60秒 | ~5秒 | ✅ |
 | 情感分析V2单条 | - | <5ms | ✅ |
 | 东财板块别名同步 | - | <10秒 | ✅ |
+| LightGBM训练(127样本) | <10秒 | ~3秒 | ✅ |
+| LightGBM批量预测(含DB读取) | - | <50ms | ✅ |
+| T+0回测全管线 | <120秒 | ~60秒 | ✅ |
+| LightGBM相关测试 | >75% | 47 pass | ✅ |
 
 ---
 

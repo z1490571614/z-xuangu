@@ -25,6 +25,7 @@ from backend.models.board import (
     DcBoardAliasObservation,
     DcBoardAliasSyncState,
 )
+from backend.models.model_training_job import ModelTrainingJob
 from backend.auth.models import User
 
 __all__ = [
@@ -56,5 +57,6 @@ __all__ = [
     "DcBoardAlias",
     "DcBoardAliasObservation",
     "DcBoardAliasSyncState",
+    "ModelTrainingJob",
     "User",
 ]

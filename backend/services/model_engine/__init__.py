@@ -9,6 +9,7 @@ from backend.services.model_engine.lightgbm_service import (
     batch_predict_before_selection,
     batch_predict_leader_main_t0,
     train_leader_main_t0_lgbm,
+    explain_leader_main_t0_prediction,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "batch_predict_before_selection",
     "batch_predict_leader_main_t0",
     "train_leader_main_t0_lgbm",
+    "explain_leader_main_t0_prediction",
 ]

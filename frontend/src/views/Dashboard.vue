@@ -93,6 +93,12 @@
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
+              <th @click="sortBy('t0_limit_success_prob')" class="sortable lightgbm-col">
+                LightGBM
+                <span v-if="sortField === 't0_limit_success_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -140,6 +146,10 @@
                 </span>
                 <span v-else class="muted">--</span>
               </td>
+              <td class="num-cell lightgbm-prob" :title="lightGbmTitle(stock)">
+                <span class="model-label">T0</span>
+                <span>{{ fmtPct(stock.t0_limit_success_prob) }}</span>
+              </td>
             </tr>
             <!-- 涨停/换手率标签行 -->
             <tr v-if="hasEnrichData(stock)" class="enrich-row">
@@ -148,7 +158,7 @@
               <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
               <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag open-num">炸板{{ stock.lu_open_num != null ? stock.lu_open_num : 0 }}次</span></td>
               <td colspan="2" class="enrich-cell"><span class="enrich-tag suc-rate">近一年封板率{{ fmtRate(stock.limit_up_suc_rate) }}</span></td>
-              <td colspan="1" class="enrich-cell"><span class="enrich-tag turnover">昨日换手{{ fmtPct(stock.prev_turnover_rate) }}</span></td>
+              <td colspan="2" class="enrich-cell"><span class="enrich-tag turnover">昨日换手{{ fmtPct(stock.prev_turnover_rate) }}</span></td>
             </tr>
             </template>
           </tbody>
@@ -309,6 +319,11 @@ function leaderLevelClass(stock) {
   if (lvl === '极强龙头' || lvl === '强势龙头') return 'level-high'
   if (lvl === '疑似龙头' || lvl === '跟风强势股') return 'level-mid'
   return 'level-low'
+}
+
+function lightGbmTitle(stock) {
+  const version = stock.t0_limit_success_model_version || '未启用模型'
+  return `LightGBM T+0封板概率模型：${version}`
 }
 
 function openStrategySelector() {
@@ -503,6 +518,19 @@ function getPctClass(v) {
 .score-level-tag.level-high { background: #f6ffed; color: #52c41a; }
 .score-level-tag.level-mid { background: #fff7e6; color: #fa8c16; }
 .score-level-tag.level-low { background: #fff2f0; color: #ff4d4f; }
+.lightgbm-col { min-width: 88px; }
+.lightgbm-prob { color: #08979c; font-weight: 700; }
+.model-label {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #e6fffb;
+  color: #08979c;
+  font-size: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  vertical-align: 1px;
+}
 .industry-tag {
   background: linear-gradient(135deg, #e6f7ff 0%, #bae7ff 100%);
   color: #1890ff;
