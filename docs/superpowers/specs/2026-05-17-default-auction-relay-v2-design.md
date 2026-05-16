@@ -535,6 +535,193 @@ error_message = 汇总 reject_reasons
 不刷新 selected_stock 预测
 ```
 
+## 智能化训练与自动归因
+
+训练任务不只保存概率和指标，还必须自动回答两个问题：
+
+```text
+这次模型为什么有效或无效？
+哪些竞价/结构/市场特征真正贡献了胜率？
+```
+
+### 训练前特征质量检查
+
+每次训练前先生成特征质量报告。质量检查不改变样本，只决定是否继续训练、是否降级训练、以及哪些特征需要标记为低可信。
+
+检查项：
+
+```text
+missing_rate: 特征缺失率
+zero_rate: 零值占比
+unique_count: 唯一值数量
+outlier_rate: 异常值比例
+coverage_by_date: 按交易日覆盖率
+positive_negative_ratio: 正负样本比例
+train_test_drift: 训练集和测试集分布漂移
+source_mix_ratio: real_selected / replay_backtest / historical_backfill 占比
+```
+
+默认规则：
+
+```text
+缺失率 >= 60% 的特征不参与当次训练
+唯一值 <= 1 的特征不参与当次训练
+测试集分布漂移严重的特征参与训练但在报告中标记 risk_feature
+正样本过少时不训练对应目标模型
+```
+
+被剔除或标记的特征必须写入 `model_metrics.feature_quality_report`。
+
+### 自动特征筛选
+
+每个 attempt 训练后都计算特征贡献，下一次 attempt 可以基于贡献结果剔除低价值特征，但不能引入新闻特征，也不能修改默认策略条件。
+
+贡献评估：
+
+```text
+lightgbm_feature_importance
+permutation_importance
+shap_importance
+single_feature_bucket_lift
+drop_one_feature_delta
+```
+
+特征保留建议：
+
+```text
+连续多次 importance 接近 0 的特征 -> 下轮降权或剔除
+permutation_importance 为负的特征 -> 标记为疑似噪声
+SHAP 方向不稳定的特征 -> 标记为不稳定特征
+单特征分桶没有区分度 -> 保留但降低解释优先级
+```
+
+这些动作只影响模型训练参数和特征列，不影响默认选股策略。
+
+### 自动分桶归因
+
+训练完成后，系统必须对关键特征自动分桶，输出每个区间的基础胜率、模型 TopK 胜率和提升幅度。
+
+重点分桶：
+
+```text
+auction_ratio: 4-8, 8-15, 15-30, 30+
+auction_turnover_rate: 0.5-1, 1-3, 3-5, 5-10, 10+
+open_change_pct: <-3, -3-0, 0-3, 3-7, 7+
+seal_rate: <60, 60-80, 80-90, 90+
+rise_10d_pct: <0, 0-10, 10-30, 30+
+market_zhaban_rate: 低 / 中 / 高
+market_max_connected_board: 1-2, 3-4, 5-6, 7+
+health_score: <50, 50-65, 65-80, 80+
+retreat_risk_score: 低 / 中 / 高
+```
+
+输出字段：
+
+```text
+feature_name
+bucket
+sample_count
+positive_rate
+baseline_rate
+lift
+topk_positive_rate
+conclusion
+```
+
+示例结论：
+
+```text
+竞昨比 8%-15% 区间 T+1 高溢价率显著高于基准
+竞价换手率 5%-10% 区间样本回撤偏大
+市场最高板低于 3 时连板模型区分度不足
+```
+
+### 单票预测归因
+
+每只股票预测后必须能解释概率高低。解释不使用 AI 文本生成，先用规则模板组合 SHAP/分桶结果。
+
+单票输出：
+
+```text
+probability
+model_version
+positive_factors
+negative_factors
+neutral_factors
+feature_contributions
+bucket_explanations
+data_quality_warnings
+```
+
+正向归因示例：
+
+```text
+auction_ratio 位于历史高胜率区间
+auction_turnover_rate 充足且不过热
+seal_rate 高于同策略样本中位数
+market_max_connected_board 显示连板高度打开
+health_score 对预测贡献为正
+```
+
+负向归因示例：
+
+```text
+auction_turnover_rate 过高，历史同区间回撤更大
+open_change_pct 偏低，竞价承接不足
+market_zhaban_rate 偏高，接力环境弱
+retreat_risk_score 对预测贡献为负
+sector_strength 不足
+```
+
+### 整体训练归因
+
+每次训练任务结束必须输出整体归因摘要：
+
+```text
+top_positive_features
+top_negative_features
+unstable_features
+noise_features
+best_buckets
+worst_buckets
+failure_reasons
+next_attempt_suggestions
+```
+
+如果模型失败，必须给出可执行的失败原因：
+
+```text
+回放策略与真实选股相似度不足
+正样本数量不足
+竞价字段缺失率过高
+训练/测试分布漂移
+TopK 未跑赢默认策略基准
+关键特征贡献不稳定
+```
+
+### 存储位置
+
+模型版本指标中保存摘要：
+
+```text
+model_version.model_metrics.feature_quality_report
+model_version.model_metrics.feature_importance
+model_version.model_metrics.permutation_importance
+model_version.model_metrics.shap_importance
+model_version.model_metrics.bucket_report
+model_version.model_metrics.training_attribution
+```
+
+训练任务中保存完整过程：
+
+```text
+model_training_job.attempts_json[].feature_quality_report
+model_training_job.attempts_json[].feature_importance
+model_training_job.attempts_json[].bucket_report
+model_training_job.attempts_json[].reject_reasons
+model_training_job.attempts_json[].next_attempt_suggestions
+```
+
 ## 诊断报告
 
 训练任务必须输出诊断报告：
