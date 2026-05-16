@@ -385,6 +385,156 @@ Top5 胜率 > 默认策略全体胜率 + 6 个百分点
 
 如果模型没有跑赢默认策略基准，不允许自动激活。
 
+## 自动调参与重训闸门
+
+模型训练完成不代表可用。每个目标模型必须先通过验收闸门，未通过时自动调整模型参数重训；达到最大尝试次数仍不通过时，任务状态置为 `rejected`，保留旧 active 模型。
+
+闸门流程：
+
+```text
+准备固定训练/验证/测试日期切分
+  -> attempt 1 使用默认参数训练
+  -> 在同一测试集计算验收指标
+  -> 通过：保存版本，可手动或按配置自动激活
+  -> 未通过：选择下一组参数重训
+  -> 超过 max_retrain_attempts 仍未通过：任务 rejected
+```
+
+重训只能调整模型参数，不能自动修改默认选股策略条件，也不能改变标签定义。允许调整：
+
+```text
+learning_rate
+n_estimators
+num_leaves
+max_depth
+min_child_samples
+subsample
+colsample_bytree
+reg_alpha
+reg_lambda
+is_unbalance / scale_pos_weight
+random_seed
+early_stopping_rounds
+```
+
+不允许自动调整：
+
+```text
+默认策略筛选条件
+竞价字段计算口径
+新闻/公告/舆情特征
+T+0/T+1 标签定义
+训练/测试日期边界
+```
+
+默认参数候选：
+
+```text
+attempt 1: balanced_default
+  learning_rate=0.05, num_leaves=31, max_depth=-1,
+  min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
+  reg_alpha=0, reg_lambda=0, is_unbalance=true
+
+attempt 2: conservative_regularized
+  learning_rate=0.03, num_leaves=15, max_depth=4,
+  min_child_samples=30, subsample=0.75, colsample_bytree=0.75,
+  reg_alpha=0.1, reg_lambda=1.0, is_unbalance=true
+
+attempt 3: shallow_stable
+  learning_rate=0.04, num_leaves=7, max_depth=3,
+  min_child_samples=40, subsample=0.9, colsample_bytree=0.7,
+  reg_alpha=0.2, reg_lambda=2.0, is_unbalance=true
+
+attempt 4: wider_ranker
+  learning_rate=0.02, num_leaves=63, max_depth=6,
+  min_child_samples=15, subsample=0.8, colsample_bytree=0.9,
+  reg_alpha=0.05, reg_lambda=0.5, is_unbalance=true
+
+attempt 5: seed_retry
+  使用当前最佳参数，仅更换 random_seed
+```
+
+默认最大尝试次数：
+
+```text
+max_retrain_attempts = 5
+```
+
+每次 attempt 必须写入 `model_training_job.attempts_json`：
+
+```text
+attempt_no
+param_profile
+params
+sample_count
+positive_count
+baseline_rate
+top1_rate
+top3_rate
+top5_rate
+top3_lift
+top5_lift
+auc
+precision
+recall
+accepted
+reject_reasons
+model_path
+model_version
+```
+
+验收闸门按目标模型分别判断。
+
+T+0 涨停模型：
+
+```text
+Top3 涨停率 >= 默认策略全体 T+0 涨停率 + 8 个百分点
+Top5 涨停率 >= 默认策略全体 T+0 涨停率 + 5 个百分点
+测试集 TopK 命中正样本数 >= 20
+AUC >= 0.55
+```
+
+T+1 高溢价模型：
+
+```text
+Top3 高溢价率 >= 默认策略全体 T+1 高溢价率 + 10 个百分点
+Top5 高溢价率 >= 默认策略全体 T+1 高溢价率 + 6 个百分点
+测试集 TopK 命中正样本数 >= 25
+AUC >= 0.55
+```
+
+T+1 连板模型：
+
+```text
+Top3 连板率 >= 默认策略全体 T+1 连板率 + 6 个百分点
+Top5 连板率 >= 默认策略全体 T+1 连板率 + 4 个百分点
+测试集 TopK 命中正样本数 >= 10
+AUC >= 0.53
+```
+
+由于连板样本稀疏，T+1 连板模型允许 AUC 门槛更低，但必须满足 TopK 相对提升。若正样本不足，任务应输出 `insufficient_positive_samples`，不允许激活模型。
+
+候选模型选择规则：
+
+```text
+先筛选通过验收闸门的 attempt
+  -> 优先 top3_lift 最大
+  -> 再比较 top5_lift
+  -> 再比较 AUC
+  -> 再选择参数更保守的模型
+```
+
+如果所有 attempt 都失败：
+
+```text
+status = rejected
+best_model_version = 空或测试模型版本
+best_model_path = 空或测试模型路径
+error_message = 汇总 reject_reasons
+不更新 model_version active
+不刷新 selected_stock 预测
+```
+
 ## 诊断报告
 
 训练任务必须输出诊断报告：
