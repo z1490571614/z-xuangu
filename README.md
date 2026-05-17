@@ -39,7 +39,9 @@
 | **封板率计算** | 基于前复权数据计算触板天数、封板天数、封板率 | ✅ |
 | **候选股特征快照** | 每日保存候选股特征,支持LightGBM训练样本沉淀 | ✅ |
 | **LightGBM竞价模型** | 双模型架构(竞价通用+龙头T+0),13维特征,自动训练+批量预测+版本管理 | ✅ |
+| **默认竞价接力V2** | 三目标模型(T0封板+T1溢价+T1连板),14维特征,多参数配置轮训+自动验收+原子激活 | ✅ |
 | **竞价回测管线** | 集合竞价数据同步→特征构建→标签生成→模型训练→预测的完整T+0回测管线 | ✅ |
+| **模型中心** | 训练任务编排、版本管理、回放验收、批量预测刷新、诊断面板 | ✅ |
 | **WebSocket实时推送** | 替代轮询,支持频道订阅和消息广播 | ✅ |
 | **飞书通知** | 自动推送选股结果(含评分/原因/风险标签)和告警到飞书群 | ✅ |
 | **定时任务** | 支持定时自动执行选股任务 | ✅ |
@@ -207,6 +209,20 @@ python test_detail_page.py
 | POST | `/api/v1/backtest/auction/sync` | 同步单日集合竞价数据 |
 | POST | `/api/v1/backtest/auction/sync-range` | 同步日期区间集合竞价数据 |
 | POST | `/api/v1/backtest/tdx-local-daily/sync` | 同步通达信本地日线数据 |
+	
+#### 模型中心
+	
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/model/models` | 获取所有活跃模型版本、特征列、评估指标 |
+| POST | `/api/v1/model/models/default-auction-replay/validate` | 回放验收（比较真实选股与回放结果） |
+| POST | `/api/v1/model/models/default-auction-samples/build` | 从选股记录构建训练样本 |
+| POST | `/api/v1/model/models/default-auction-relay/train` | 一键训练默认竞价接力三目标模型 |
+| GET | `/api/v1/model/models/default-auction-relay/diagnostics/{job_id}` | 接力模型训练诊断 |
+| POST | `/api/v1/model/models/{model_name}/versions/{version}/activate` | 激活指定模型版本 |
+| POST | `/api/v1/model/models/{model_name}/training-jobs` | 创建通用模型训练任务 |
+| GET | `/api/v1/model/models/training-jobs/{job_id}` | 获取训练任务状态 |
+| POST | `/api/v1/model/models/{model_name}/refresh-predictions` | 刷新选股记录预测值 |
 
 ---
 
@@ -304,25 +320,39 @@ python test_detail_page.py
 | 60-69 | C |
 | <60 | D |
 
-### LightGBM竞价模型（双模型架构）
+### LightGBM竞价模型（多模型架构）
 
-系统包含两套LightGBM模型，服务不同场景：
+系统包含多套LightGBM模型，服务不同场景：
 
 | 模型 | 模型名 | 特征数 | 用途 | 影响评分 |
 |------|--------|--------|------|----------|
-| 竞价通用模型 | `active_auction_lgbm` | 8维 | 竞价活跃度+封板率+趋势综合评分 | ✅ `final_score` 中占40%权重 |
-| 龙头T+0模型 | `leader_main_t0_lgbm` | 13维 | 龙头股T+0封板概率预测 | ❌ 仅展示排序参考 |
+| 竞价通用模型 | `active_auction_lgbm` | 8维 | 竞价活跃度+封板率+趋势综合评分 | ✅ `final_score` 中占35%权重 |
+| 龙头T+0模型 | `leader_main_t0_lgbm` | 9维 | 龙头股T+0封板概率预测 | ✅ `final_score` 中占10%权重 |
+| 默认竞价接力V2 | 三目标模型组 | 14维 | 默认策略候选股的T0/T1/T1连板预测 | ❌ 独立预测展示 |
 
-**龙头T+0模型特征（13维）**:
-`limit_up_streak`(连板数), `market_height_rank`(市场身位排名), `limit_up_count_100d`, `seal_rate_100d`, `rise_5d_pct`, `rise_10d_pct`, `pre_change_pct`, `open_change_pct`, `auction_ratio`(竞昨比), `auction_turnover_rate`(竞价换手率), `circ_mv`(流通市值), `sector_change_pct`(板块涨跌), `sector_limit_up_count`(板块涨停家数)
-
+**默认竞价接力V2（三目标模型）**:
+	
+| 子模型 | 模型名 | 预测目标 | 验收闸门 |
+|--------|--------|---------|---------|
+| T+0封板模型 | `default_auction_t0_limit_lgbm` | T日封板成功概率 | Top3 Lift≥0.08, Top5 Lift≥0.05, AUC≥0.55 |
+| T+1溢价模型 | `default_auction_t1_premium_lgbm` | T+1开盘/高点/收盘任一溢价≥3% | Top3 Lift≥0.10, Top5 Lift≥0.06, AUC≥0.55 |
+| T+1连板模型 | `default_auction_t1_continue_lgbm` | T+1封板连板成功概率 | Top3 Lift≥0.06, Top5 Lift≥0.04, AUC≥0.53 |
+	
+**默认竞价接力V2特征（14维）**:
+`auction_ratio`(竞昨比), `auction_turnover_rate`(竞价换手率), `open_change_pct`(开盘涨幅), `pre_change_pct`(昨涨幅), `limit_up_count`(涨停次数), `touch_days`(触板天数), `limit_up_days`(涨停天数), `seal_rate`(封板率), `rise_10d_pct`(近10日涨幅), `circ_mv`(流通市值), `prev_turnover_rate`(昨日换手率), `rule_score`(规则评分), `final_score`(最终评分), `risk_tags_count`(风险标签数)
+	
+**训练特色**: 5种参数配置轮训(balanced/ conservative/ shallow/ wider/ seed_retry) → 自动验收闸门 → 三目标原子激活 → 训练诊断归因(SHAP+分桶)
+	
+**龙头T+0模型特征（9维）**:
+`limit_up_streak`(连板数), `limit_up_count_100d`, `seal_rate_100d`, `rise_10d_pct`, `pre_change_pct`, `open_change_pct`, `auction_ratio`(竞昨比), `auction_turnover_rate`(竞价换手率), `circ_mv`(流通市值)
+	
 **T+0标签定义**: 非一字板 + 最高价触及涨停价 + 收盘封死涨停 → `label=1`(成功)；一字板(开/高/低/收全部接近涨停价) → `label=None`(排除出训练集)
-
-**训练管线**: 集合竞价数据同步 → 日线数据同步 → 竞昨比重算 → 候选股特征构建(13维+规则过滤) → T+0标签生成 → 模型训练(70/20/10分割+9阈值评估) → 版本化持久化 → 批量预测集成至选股管线
-
-**模型管理**: 每次训练自动版本化(`leader_main_t0_lgbm_{version}.pkl`)，DB记录特征列/评估指标/训练日期区间，`is_active`标记活跃版本，`/api/v1/model/status` 可查询所有活跃模型状态
-
-**降级策略**: 模型文件缺失或 `joblib` 不可用时，`t0_limit_success_prob` 返回 `None`，不影响核心选股流程，规则评分独立运行
+	
+**训练管线**: 集合竞价数据同步 → 日线数据同步 → 竞昨比重算 → 候选股特征构建 → 标签生成 → 模型训练(时间顺序70/15/15分割+TopK评估) → 版本化持久化 → 批量预测集成至选股管线
+	
+**模型管理**: 每次训练自动版本化(`{model_name}_{version}.pkl`)，DB记录特征列/评估指标/训练日期区间，`is_active`标记活跃版本，`/api/v1/model/models` 可查询所有活跃模型状态
+	
+**降级策略**: 模型文件缺失或 `joblib`/`lightgbm` 不可用时，预测值返回 `None`，不影响核心选股流程，规则评分独立运行
 
 ---
 
@@ -414,13 +444,6 @@ pytest tests/ -v --cov=backend
 │
 ├── backend/                               # 后端代码(FastAPI)
 │   ├── main.py                           # 应用入口(含启动时板块词典/别名同步)
-│   ├── api/                              # API路由
-│   │   ├── stock_detail.py              # 个股详情API(含龙虎榜/风险拆解/龙头战法)
-│   │   ├── stock.py                     # 选股API
-│   │   ├── score_v2.py                  # 评分V2/V3 API
-│   │   ├── anomaly.py                   # 异动解读API
-│   │   ├── overview_brief.py            # AI综合概览API
-│   │   └── news_v2.py                   # 新闻舆情API
 │   ├── models/                           # 数据模型
 │   │   ├── stock_lhb.py                 # 龙虎榜数据
 │   │   ├── stock_risk.py                # 风险拆解+龙头战法评分(DragonLeaderScore)
@@ -428,9 +451,20 @@ pytest tests/ -v --cov=backend
 │   │   ├── stock_ths_board.py           # 同花顺板块
 │   │   ├── anomaly_interpretation.py    # 异动解读
 │   │   ├── overview_brief.py            # AI综合概览
-│   │   ├── selected_stock.py            # 选股结果(含t0_limit_success_prob)
+│   │   ├── selected_stock.py            # 选股结果(含LightGBM预测字段)
 │   │   ├── auction_backtest.py          # 竞价回测样本+训练样本ORM
+│   │   ├── model_training_job.py        # 模型训练任务(状态/阶段/验收)
+│   │   ├── default_auction_training_sample.py  # 默认竞价接力训练样本(14维+3标签)
+│   │   ├── model_version.py             # 模型版本管理
 │   │   └── scoring_v2/                  # 评分V3模型
+│   ├── api/                              # API路由
+│   │   ├── stock_detail.py              # 个股详情API(含龙虎榜/风险拆解/龙头战法)
+│   │   ├── stock.py                     # 选股API
+│   │   ├── score_v2.py                  # 评分V2/V3 API
+│   │   ├── anomaly.py                   # 异动解读API
+│   │   ├── overview_brief.py            # AI综合概览API
+│   │   ├── model_management.py          # 模型中心API(训练/激活/诊断/回放验收)
+│   │   └── news_v2.py                   # 新闻舆情API
 │   ├── services/                         # 业务逻辑
 │   │   ├── lhb_service.py              # 龙虎榜服务
 │   │   ├── seat_library.py             # 统一席位库(高溢价/核按钮/量化/机构/散户)
@@ -469,7 +503,16 @@ pytest tests/ -v --cov=backend
 │   │   ├── stock_selector.py           # 四阶段选股协调
 │   │   ├── scoring_v2/                 # 评分V3服务
 │   │   ├── model_engine/               # LightGBM模型引擎
-│   │   │   └── lightgbm_service.py    # 训练+预测+版本管理+双模型
+│   │   │   ├── lightgbm_service.py     # 训练+预测+版本管理+双模型
+│   │   │   ├── model_management_service.py  # 模型中心(训练任务+版本激活+预测刷新)
+│   │   │   ├── default_auction_relay_job_service.py  # 默认竞价接力三目标训练编排
+│   │   │   ├── default_auction_model_trainer.py      # 默认竞价接力单目标训练器
+│   │   │   ├── default_auction_model_evaluator.py    # TopK评估+验收闸门
+│   │   │   ├── default_auction_attribution_service.py # 特征质量+分桶归因
+│   │   │   ├── default_auction_sample_builder.py     # 训练样本构建
+│   │   │   ├── default_auction_label_builder.py      # 三目标标签辅助
+│   │   │   ├── default_auction_replay_service.py     # 历史回放入口
+│   │   │   └── replay_validation_service.py          # 回放验收(召回率/Jaccard)
 │   │   ├── backtest/                   # 回测管线
 │   │   │   ├── leader_main_t0_feature_builder.py  # 特征构建+候选过滤
 │   │   │   └── leader_main_t0_label_builder.py    # T+0标签生成
@@ -486,6 +529,9 @@ pytest tests/ -v --cov=backend
 │   │       ├── AnomalyInterpretation.vue # 异动解读
 │   │       ├── OverviewBrief.vue       # 综合概览
 │   │       └── ...                     # 其他Tab组件
+│   ├── src/views/
+│   │   ├── ModelCenter.vue              # 模型中心(训练任务/版本管理/诊断/回放验收)
+│   │   └── StockResults.vue             # 选股结果列表(含默认接力预测列)
 │
 ├── scripts/                             # 脚本工具
 │   ├── generate_dc_board_aliases.py    # 板块别名生成
@@ -499,6 +545,12 @@ pytest tests/ -v --cov=backend
 │   │   ├── test_leader_main_t0_label_builder.py  # 标签生成测试
 │   │   ├── test_model_status_api.py      # 模型状态API测试
 │   │   ├── test_stock_api_t0_model_fields.py  # T+0字段API测试
+│   │   ├── test_default_auction_model_trainer.py     # 默认接力模型训练器测试
+│   │   ├── test_default_auction_model_evaluator.py   # 默认接力模型评估器测试
+│   │   ├── test_default_auction_attribution_service.py # 默认接力归因服务测试
+│   │   ├── test_default_auction_training_sample.py   # 默认接力训练样本测试
+│   │   ├── test_default_auction_model_management_api.py # 模型中心API测试
+│   │   ├── test_default_auction_replay_validation.py  # 回放验收测试
 │   │   ├── test_dragon_leader.py         # 龙头战法评分测试
 │   │   ├── test_dragon_leader_e2e.py     # 龙头战法端到端测试
 │   │   ├── test_dc_board_service.py      # 东财板块服务测试
@@ -508,7 +560,8 @@ pytest tests/ -v --cov=backend
 │   │   ├── test_risk_breakdown_persistence.py # 风险拆解持久化测试
 │   │   └── ...                           # 其他测试
 │   └── frontend/e2e/
-│       └── lightgbm-results.spec.js      # LightGBM结果页e2e测试
+│       ├── lightgbm-results.spec.js                # LightGBM结果页e2e测试
+│       └── default-auction-relay-model-center.spec.js  # 默认接力模型中心e2e测试
 │
 ├── AGENTS.md                            # 架构文档
 ├── CLAUDE.md                            # 开发指南
@@ -534,6 +587,9 @@ pytest tests/ -v --cov=backend
 | LightGBM批量预测(含DB读取) | - | <50ms | ✅ |
 | T+0回测全管线 | <120秒 | ~60秒 | ✅ |
 | LightGBM相关测试 | >75% | 47 pass | ✅ |
+| 默认竞价接力单目标训练 | <10秒 | ~3秒 | ✅ |
+| 默认竞价接力三目标全管线 | <120秒 | ~20秒 | ✅ |
+| 回放验收(5日) | <30秒 | ~5秒 | ✅ |
 
 ---
 
@@ -543,6 +599,6 @@ MIT License
 
 ---
 
-**文档版本**: v9.0
-**最后更新**: 2026-05-08
+**文档版本**: v10.0
+**最后更新**: 2026-05-17
 **维护者**: AI Assistant

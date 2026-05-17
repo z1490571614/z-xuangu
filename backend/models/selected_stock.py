@@ -47,6 +47,10 @@ class SelectedStock(Base):
     rule_score = Column(DECIMAL(5, 2), nullable=True)
     model_score = Column(DECIMAL(5, 2), nullable=True)
     t0_limit_success_prob = Column(DECIMAL(5, 2), nullable=True)
+    default_t0_limit_prob = Column(DECIMAL(5, 2), nullable=True)
+    default_t1_premium_prob = Column(DECIMAL(5, 2), nullable=True)
+    default_t1_continue_prob = Column(DECIMAL(5, 2), nullable=True)
+    default_relay_score = Column(DECIMAL(5, 2), nullable=True)
     final_score = Column(DECIMAL(5, 2), nullable=True)
     score_level = Column(String(20), nullable=True)
     score_breakdown = Column(Text, nullable=True)  # JSON
@@ -55,6 +59,7 @@ class SelectedStock(Base):
     next_day_plan = Column(Text, nullable=True)
     model_version = Column(String(50), nullable=True)
     t0_limit_success_model_version = Column(String(50), nullable=True)
+    default_relay_model_version = Column(String(255), nullable=True)
 
     created_at = Column(DateTime, server_default=func.now())
 

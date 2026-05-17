@@ -22,7 +22,7 @@
             <div class="model-title">{{ name }}</div>
             <div class="metric-row">
               <span>Active</span>
-              <strong>{{ models[name].active_version?.version || '--' }}</strong>
+              <strong>{{ activeVersionText(models[name]) }}</strong>
             </div>
             <div class="metric-row">
               <span>AUC</span>
@@ -32,7 +32,10 @@
               <span>胜率</span>
               <strong>{{ fmtPct01(models[name].active_version?.metrics?.precision) }}</strong>
             </div>
-            <div class="version-list">
+            <div v-if="isCompositeModel(name)" class="version-list">
+              <span class="version-chip active composite-chip">active/composite</span>
+            </div>
+            <div v-else class="version-list">
               <button
                 v-for="version in models[name].versions"
                 :key="version.version"
@@ -49,6 +52,182 @@
         <p v-if="activateStatus" class="status-line">{{ activateStatus }}</p>
       </section>
 
+      <section class="panel relay-panel">
+        <div class="panel-head">
+          <div>
+            <h3>默认竞价接力 V2</h3>
+            <p class="panel-subtitle">三目标模型验收、样本构建与组合训练</p>
+          </div>
+          <span :class="['status-badge', relayCompositeReady ? 'passed' : 'rejected']">
+            {{ relayCompositeReady ? 'active ready' : 'target incomplete' }}
+          </span>
+        </div>
+
+        <div class="relay-status-grid">
+          <div v-for="target in relayTargetStatuses" :key="target.model_name" class="target-card">
+            <div class="target-name">{{ target.model_name }}</div>
+            <div class="metric-row">
+              <span>active_version</span>
+              <strong>{{ target.active_version || '--' }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>available</span>
+              <strong>{{ target.available ? '可用' : '未就绪' }}</strong>
+            </div>
+          </div>
+          <div class="target-card composite-card">
+            <div class="target-name">default_auction_relay_v2</div>
+            <div class="metric-row">
+              <span>active_version</span>
+              <strong>{{ activeVersionText(relayModel) }}</strong>
+            </div>
+            <div class="target-list">
+              <span v-for="target in relayCompositeTargets" :key="target">{{ target }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="relay-grid">
+          <div class="relay-card">
+            <h4>回放验收</h4>
+            <div class="form-grid compact">
+              <label>
+                recent_days
+                <input v-model.number="relay.recentDays" type="number" min="1" max="30" />
+              </label>
+              <button class="btn-secondary" :disabled="relay.validating" @click="validateRelayReplay">
+                {{ relay.validating ? '验收中' : '验证最近真实选股' }}
+              </button>
+            </div>
+            <div v-if="relay.validating" class="state-box">回放验收中</div>
+            <div v-else-if="relay.validationError" class="state-box error">
+              {{ relay.validationError }}
+              <button class="btn-secondary small" @click="validateRelayReplay">重试</button>
+            </div>
+            <div v-else-if="relay.validation" class="result-box">
+              <div class="result-head">
+                <span :class="['status-badge', relay.validation.accepted ? 'passed' : 'rejected']">
+                  {{ relay.validation.accepted ? 'accepted' : 'rejected' }}
+                </span>
+                <span>recent_days {{ relay.validation.recent_days ?? relay.recentDays }}</span>
+              </div>
+              <div v-if="relay.validation.reject_reasons?.length" class="reason-list">
+                <span v-for="reason in relay.validation.reject_reasons" :key="reason">{{ reason }}</span>
+              </div>
+              <div v-if="relayValidationDays.length" class="daily-list">
+                <div v-for="day in relayValidationDays" :key="day.trade_date || day.record_id" class="daily-row">
+                  <strong>{{ day.trade_date || '--' }}</strong>
+                  <span>真实 {{ (day.real_codes || []).length }}</span>
+                  <span>回放 {{ (day.replay_codes || []).length }}</span>
+                  <span v-if="day.diagnostics?.length">{{ day.diagnostics.join(' / ') }}</span>
+                </div>
+              </div>
+              <div v-else class="empty-inline">daily 暂无明细</div>
+            </div>
+            <div v-else class="empty-inline">尚未执行回放验收</div>
+          </div>
+
+          <div class="relay-card">
+            <h4>样本构建</h4>
+            <div class="form-grid compact">
+              <label>
+                record_id
+                <input v-model="relay.recordId" placeholder="例如 46" />
+              </label>
+              <label>
+                sample_source
+                <input v-model="relay.sampleSource" placeholder="real_selected" />
+              </label>
+              <button class="btn-secondary" :disabled="relay.building || !relay.recordId" @click="buildRelaySamples">
+                {{ relay.building ? '构建中' : '构建样本' }}
+              </button>
+            </div>
+            <div v-if="relay.building" class="state-box">样本构建中</div>
+            <div v-else-if="relay.buildError" class="state-box error">
+              {{ relay.buildError }}
+              <button class="btn-secondary small" :disabled="!relay.recordId" @click="buildRelaySamples">重试</button>
+            </div>
+            <div v-else-if="relay.buildResult" class="result-box">
+              <div class="stats-row">
+                <span>created <strong>{{ relay.buildResult.created ?? 0 }}</strong></span>
+                <span>updated <strong>{{ relay.buildResult.updated ?? 0 }}</strong></span>
+                <span>skipped <strong>{{ relay.buildResult.skipped ?? 0 }}</strong></span>
+              </div>
+              <div v-if="relay.buildResult.reject_reasons?.length" class="reason-list">
+                <span v-for="reason in relay.buildResult.reject_reasons" :key="reason">{{ reason }}</span>
+              </div>
+            </div>
+            <div v-else class="empty-inline">尚未构建样本</div>
+          </div>
+
+          <div class="relay-card wide">
+            <h4>三目标训练</h4>
+            <div class="form-grid compact">
+              <label>
+                start
+                <input v-model="relay.startDate" />
+              </label>
+              <label>
+                end
+                <input v-model="relay.endDate" />
+              </label>
+              <label>
+                max_retrain_attempts
+                <input v-model.number="relay.maxRetrainAttempts" type="number" min="1" />
+              </label>
+              <label class="check-row">
+                <input v-model="relay.autoActivate" type="checkbox" />
+                auto_activate
+              </label>
+              <button class="btn-primary" :disabled="relay.training" @click="startRelayTraining">
+                {{ relay.training ? '训练中' : '启动三目标训练' }}
+              </button>
+            </div>
+            <div v-if="relay.training && !relay.diagnostics" class="state-box">训练任务创建中</div>
+            <div v-else-if="relay.trainError" class="state-box error">
+              {{ relay.trainError }}
+              <button v-if="relay.jobId" class="btn-secondary small" @click="pollRelayDiagnostics">刷新诊断</button>
+            </div>
+            <div v-else-if="relay.diagnostics" class="job-panel relay-job">
+              <div class="job-head">
+                <h4>任务 #{{ relay.diagnostics.id || relay.jobId || '--' }}</h4>
+                <span :class="['status-badge', relay.diagnostics.status]">{{ relay.diagnostics.status || '--' }}</span>
+              </div>
+              <div class="progress">
+                <div class="progress-bar" :style="{ width: `${relay.diagnostics.progress || 0}%` }"></div>
+              </div>
+              <div class="progress-text">{{ relay.diagnostics.progress || 0 }}% / {{ relay.diagnostics.phase || '--' }}</div>
+
+              <div v-if="relay.diagnostics.acceptance?.targets" class="target-acceptance">
+                <div v-for="(target, name) in relay.diagnostics.acceptance.targets" :key="name" class="acceptance-row">
+                  <strong>{{ name }}</strong>
+                  <span>{{ target.accepted ? '通过' : '未通过' }}</span>
+                  <span v-if="target.version">版本 {{ target.version }}</span>
+                  <span v-if="target.reject_reasons?.length">{{ target.reject_reasons.join(' / ') }}</span>
+                </div>
+              </div>
+
+              <div v-if="relay.diagnostics.attempts?.length" class="attempt-list">
+                <div v-for="attempt in relay.diagnostics.attempts" :key="`${attempt.target}-${attempt.attempt}-${attempt.profile}`" class="attempt-row">
+                  <strong>{{ attempt.target }}</strong>
+                  <span>第 {{ attempt.attempt }} 次</span>
+                  <span>{{ attempt.accepted ? '通过' : '未通过' }}</span>
+                  <span v-if="attempt.profile">{{ attempt.profile }}</span>
+                  <span v-if="attempt.reject_reasons?.length">{{ attempt.reject_reasons.join(' / ') }}</span>
+                </div>
+              </div>
+              <div v-else class="empty-inline">attempts 暂无明细</div>
+
+              <div v-if="relay.diagnostics.logs?.length" class="log-list">
+                <div v-for="(log, idx) in relay.diagnostics.logs" :key="idx">{{ log.message || log }}</div>
+              </div>
+              <div v-else class="empty-inline">logs 暂无内容</div>
+            </div>
+            <div v-else class="empty-inline">尚未启动三目标训练</div>
+          </div>
+        </div>
+      </section>
+
       <section class="panel">
         <h3>预测刷新</h3>
         <div class="form-grid compact">
@@ -60,7 +239,8 @@
           </label>
           <label>
             版本
-            <select v-model="selectedVersion">
+            <select v-model="selectedVersion" :disabled="selectedModelIsComposite">
+              <option v-if="selectedModelIsComposite" value="">active/composite</option>
               <option value="">active</option>
               <option v-for="version in models[selectedModel]?.versions || []" :key="version.version" :value="version.version">
                 {{ version.version }}{{ version.is_active ? ' active' : '' }}
@@ -197,6 +377,54 @@ const refreshing = ref(false)
 const training = ref(false)
 const currentJob = ref(null)
 const modelNames = computed(() => Object.keys(models.value))
+const DEFAULT_AUCTION_RELAY_MODEL = 'default_auction_relay_v2'
+const DEFAULT_AUCTION_TARGETS = [
+  'default_auction_t0_limit_lgbm',
+  'default_auction_t1_premium_lgbm',
+  'default_auction_t1_continue_lgbm',
+]
+
+const relay = ref({
+  validating: false,
+  building: false,
+  training: false,
+  validation: null,
+  buildResult: null,
+  diagnostics: null,
+  validationError: '',
+  buildError: '',
+  trainError: '',
+  recentDays: 5,
+  recordId: '',
+  sampleSource: 'real_selected',
+  startDate: '20250116',
+  endDate: '',
+  maxRetrainAttempts: 5,
+  autoActivate: false,
+  jobId: null,
+})
+
+const relayModel = computed(() => models.value[DEFAULT_AUCTION_RELAY_MODEL] || {})
+const relayCompositeReady = computed(() => Boolean(relayModel.value.active_version))
+const selectedModelIsComposite = computed(() => isCompositeModel(selectedModel.value))
+const relayCompositeTargets = computed(() => {
+  const targets = relayModel.value.target_models
+  if (!Array.isArray(targets) || targets.length === 0) return DEFAULT_AUCTION_TARGETS
+  return targets.map(target => typeof target === 'string' ? target : target.model_name).filter(Boolean)
+})
+const relayTargetStatuses = computed(() => DEFAULT_AUCTION_TARGETS.map(name => {
+  const targetFromComposite = Array.isArray(relayModel.value.target_models)
+    ? relayModel.value.target_models.find(target => (typeof target === 'string' ? target : target.model_name) === name)
+    : null
+  const model = models.value[name] || {}
+  if (targetFromComposite && typeof targetFromComposite === 'object') return targetFromComposite
+  return {
+    model_name: name,
+    active_version: activeVersionText(model),
+    available: Boolean(model.active_version),
+  }
+}))
+const relayValidationDays = computed(() => relay.value.validation?.daily || relay.value.validation?.days || [])
 
 const trainingForm = ref({
   start_date: '20250101',
@@ -218,15 +446,22 @@ const trainingForm = ref({
 
 let ws = null
 let pollTimer = null
+let relayPollTimer = null
 
 watch(modelNames, names => {
   if (names.length && !names.includes(selectedModel.value)) selectedModel.value = names[0]
 })
 
+watch(selectedModel, () => {
+  selectedVersion.value = ''
+})
+
 onMounted(() => {
   if (route.query.record_id) refreshRecordId.value = String(route.query.record_id)
   const today = new Date()
-  trainingForm.value.end_date = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
+  const todayText = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
+  trainingForm.value.end_date = todayText
+  relay.value.endDate = todayText
   loadModels()
   connectModelWS()
 })
@@ -234,6 +469,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (ws) ws.close()
   if (pollTimer) clearTimeout(pollTimer)
+  if (relayPollTimer) clearTimeout(relayPollTimer)
 })
 
 async function loadModels() {
@@ -269,7 +505,7 @@ async function refreshPredictions() {
   try {
     const res = await axios.post(`/api/v1/models/${selectedModel.value}/refresh-predictions`, {
       record_id: Number(refreshRecordId.value),
-      version: selectedVersion.value || null,
+      version: selectedModelIsComposite.value ? null : (selectedVersion.value || null),
     })
     const data = res.data?.data || {}
     refreshStatus.value = `已更新 ${data.updated_count || 0} 只股票`
@@ -277,6 +513,78 @@ async function refreshPredictions() {
     refreshStatus.value = '刷新失败：' + (e.response?.data?.detail || e.message)
   } finally {
     refreshing.value = false
+  }
+}
+
+async function validateRelayReplay() {
+  relay.value.validating = true
+  relay.value.validationError = ''
+  relay.value.validation = null
+  try {
+    const res = await axios.post('/api/v1/models/default-auction-replay/validate', {
+      recent_days: Number(relay.value.recentDays) || 5,
+    })
+    relay.value.validation = res.data?.data || null
+  } catch (e) {
+    relay.value.validationError = '回放验收失败：' + (e.response?.data?.detail || e.message)
+  } finally {
+    relay.value.validating = false
+  }
+}
+
+async function buildRelaySamples() {
+  relay.value.building = true
+  relay.value.buildError = ''
+  relay.value.buildResult = null
+  try {
+    const res = await axios.post('/api/v1/models/default-auction-samples/build', {
+      record_id: Number(relay.value.recordId),
+      sample_source: relay.value.sampleSource || 'real_selected',
+    })
+    relay.value.buildResult = res.data?.data || null
+  } catch (e) {
+    relay.value.buildError = '样本构建失败：' + (e.response?.data?.detail || e.message)
+  } finally {
+    relay.value.building = false
+  }
+}
+
+async function startRelayTraining() {
+  relay.value.training = true
+  relay.value.trainError = ''
+  relay.value.diagnostics = null
+  try {
+    const res = await axios.post('/api/v1/models/default-auction-relay/train', {
+      start_date: relay.value.startDate,
+      end_date: relay.value.endDate,
+      auto_activate: Boolean(relay.value.autoActivate),
+      params: {
+        max_retrain_attempts: Number(relay.value.maxRetrainAttempts) || 1,
+      },
+    })
+    relay.value.jobId = res.data?.data?.job_id
+    relay.value.diagnostics = { id: relay.value.jobId, status: 'pending', progress: 0, logs: [] }
+    await pollRelayDiagnostics()
+  } catch (e) {
+    relay.value.trainError = '三目标训练失败：' + (e.response?.data?.detail || e.message)
+  } finally {
+    relay.value.training = false
+  }
+}
+
+async function pollRelayDiagnostics() {
+  if (!relay.value.jobId) return
+  if (relayPollTimer) clearTimeout(relayPollTimer)
+  try {
+    const res = await axios.get(`/api/v1/models/default-auction-relay/diagnostics/${relay.value.jobId}`)
+    relay.value.diagnostics = res.data?.data || relay.value.diagnostics
+    if (['pending', 'running'].includes(relay.value.diagnostics?.status)) {
+      relayPollTimer = setTimeout(pollRelayDiagnostics, 3000)
+    } else {
+      await loadModels()
+    }
+  } catch (e) {
+    relay.value.trainError = '训练诊断加载失败：' + (e.response?.data?.detail || e.message)
   }
 }
 
@@ -352,6 +660,17 @@ function fmtMetric(v) {
 function fmtPct01(v) {
   return v == null ? '--' : `${(Number(v) * 100).toFixed(1)}%`
 }
+
+function isCompositeModel(name) {
+  return name === DEFAULT_AUCTION_RELAY_MODEL || Boolean(models.value[name]?.is_composite)
+}
+
+function activeVersionText(model) {
+  const active = model?.active_version
+  if (!active) return '--'
+  if (typeof active === 'string') return active
+  return active.version || active.status || 'active'
+}
 </script>
 
 <style scoped>
@@ -360,6 +679,9 @@ function fmtPct01(v) {
 .page-title h2 { font-size: 24px; color: #1f2937; }
 .panel, .state-panel { background: #fff; border-radius: 8px; padding: 18px; margin-bottom: 16px; box-shadow: 0 2px 6px rgba(0,0,0,.06); }
 .panel h3 { font-size: 17px; margin-bottom: 14px; color: #1f2937; }
+.panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+.panel-head h3 { margin-bottom: 4px; }
+.panel-subtitle { margin: 0; color: #6b7280; font-size: 13px; }
 .model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
 .model-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; }
 .model-title { font-weight: 700; color: #0f766e; margin-bottom: 10px; }
@@ -368,6 +690,24 @@ function fmtPct01(v) {
 .version-chip { border: 1px solid #d1d5db; background: #fff; border-radius: 6px; padding: 6px 9px; cursor: pointer; font-size: 12px; }
 .version-chip.active { border-color: #0f766e; color: #0f766e; background: #ecfdf5; }
 .version-chip.unavailable { color: #9ca3af; background: #f9fafb; cursor: not-allowed; }
+.composite-chip { cursor: default; }
+.relay-panel { border: 1px solid #dbeafe; }
+.relay-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.target-card, .relay-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; background: #fff; }
+.target-name { font-weight: 700; color: #1f2937; margin-bottom: 8px; font-size: 13px; word-break: break-all; }
+.target-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.target-list span { background: #f3f4f6; color: #374151; border-radius: 6px; padding: 4px 7px; font-size: 12px; }
+.relay-grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 12px; }
+.relay-card.wide { grid-column: 1 / -1; }
+.relay-card h4 { margin: 0 0 12px; color: #374151; font-size: 15px; }
+.state-box { margin-top: 12px; padding: 10px; border-radius: 6px; background: #f9fafb; color: #4b5563; font-size: 13px; }
+.state-box.error { background: #fef2f2; color: #b91c1c; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.result-box { margin-top: 12px; display: grid; gap: 10px; font-size: 13px; color: #374151; }
+.result-head, .stats-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.reason-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.reason-list span { background: #fff7ed; color: #c2410c; border-radius: 6px; padding: 4px 7px; font-size: 12px; }
+.daily-list, .target-acceptance { display: grid; gap: 8px; }
+.daily-row, .acceptance-row { display: flex; flex-wrap: wrap; gap: 10px; background: #f9fafb; border-radius: 6px; padding: 8px; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; align-items: end; }
 .form-grid.compact { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
 label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #4b5563; }
@@ -378,6 +718,7 @@ input, select { height: 36px; border: 1px solid #d1d5db; border-radius: 6px; pad
 .advanced summary { cursor: pointer; margin-bottom: 12px; }
 .button-row { display: flex; gap: 10px; margin-top: 14px; }
 .btn-primary, .btn-secondary { height: 36px; border: none; border-radius: 6px; padding: 0 14px; cursor: pointer; white-space: nowrap; }
+.btn-secondary.small { height: 28px; padding: 0 10px; font-size: 12px; }
 .btn-primary { background: #1677ff; color: #fff; }
 .btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
 .btn-primary:disabled, .btn-secondary:disabled { opacity: .55; cursor: not-allowed; }
@@ -394,4 +735,7 @@ input, select { height: 36px; border: 1px solid #d1d5db; border-radius: 6px; pad
 .attempt-list { margin-top: 12px; display: grid; gap: 8px; }
 .attempt-row { display: flex; flex-wrap: wrap; gap: 10px; font-size: 13px; color: #4b5563; background: #f9fafb; padding: 8px; border-radius: 6px; }
 .log-list { margin-top: 12px; max-height: 180px; overflow: auto; border-top: 1px solid #e5e7eb; padding-top: 10px; font-size: 13px; color: #374151; display: grid; gap: 6px; }
+@media (max-width: 900px) {
+  .relay-grid { grid-template-columns: 1fr; }
+}
 </style>

@@ -23,7 +23,7 @@ class ModelTrainingJob(Base):
     acceptance_json = Column(Text)
     attempts_json = Column(Text)
     logs_json = Column(Text)
-    best_model_version = Column(String(50))
+    best_model_version = Column(String(255))
     best_model_path = Column(String(500))
     error_message = Column(Text)
     started_at = Column(DateTime)

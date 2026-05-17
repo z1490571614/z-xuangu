@@ -28,6 +28,10 @@ test('选股结果在评分旁显示 LightGBM 概率', async ({ page }) => {
             final_score: 57,
             t0_limit_success_prob: 41.72,
             t0_limit_success_model_version: '20260509_172312',
+            default_t0_limit_prob: 40.0,
+            default_t1_premium_prob: 31.5,
+            default_t1_continue_prob: 18.25,
+            default_relay_score: 66.6,
             reasons: ['涨停基因强'],
           }],
         },
@@ -42,6 +46,14 @@ test('选股结果在评分旁显示 LightGBM 概率', async ({ page }) => {
   await page.goto('http://localhost:8080/stock-results');
 
   await expect(page.locator('.stock-table thead')).toContainText('LightGBM');
+  await expect(page.locator('.stock-table thead')).toContainText('T+0涨停概率');
+  await expect(page.locator('.stock-table thead')).toContainText('T+1高溢价概率');
+  await expect(page.locator('.stock-table thead')).toContainText('T+1连板概率');
+  await expect(page.locator('.stock-table thead')).toContainText('接力分');
   await expect(page.locator('.stock-table tbody')).toContainText('41.72%');
+  await expect(page.locator('.stock-table tbody')).toContainText('40.0%');
+  await expect(page.locator('.stock-table tbody')).toContainText('31.5%');
+  await expect(page.locator('.stock-table tbody')).toContainText('18.3%');
+  await expect(page.locator('.stock-table tbody')).toContainText('66.6');
   await expect(page.locator('.stock-table tbody')).toContainText('57.0');
 });

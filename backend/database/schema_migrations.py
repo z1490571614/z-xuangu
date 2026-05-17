@@ -22,6 +22,11 @@ def ensure_runtime_columns(engine) -> None:
         "selected_stock": {
             "t0_limit_success_prob": "NUMERIC(5, 2)",
             "t0_limit_success_model_version": "VARCHAR(50)",
+            "default_t0_limit_prob": "NUMERIC(5, 2)",
+            "default_t1_premium_prob": "NUMERIC(5, 2)",
+            "default_t1_continue_prob": "NUMERIC(5, 2)",
+            "default_relay_score": "NUMERIC(5, 2)",
+            "default_relay_model_version": "VARCHAR(255)",
         },
         "stock_risk_breakdown": {
             "market_score": "INTEGER",
@@ -52,11 +57,95 @@ def ensure_runtime_columns(engine) -> None:
         "model_training_job": {
             "mode": "VARCHAR(20) NOT NULL DEFAULT 'test'",
             "auto_activate": "INTEGER NOT NULL DEFAULT 0",
+            "best_model_version": "VARCHAR(255)",
+        },
+        "default_auction_training_sample": {
+            "trade_date": "VARCHAR(10)",
+            "ts_code": "VARCHAR(20)",
+            "name": "VARCHAR(50)",
+            "strategy_name": "VARCHAR(50)",
+            "strategy_version": "VARCHAR(50)",
+            "sample_source": "VARCHAR(30)",
+            "replay_source": "VARCHAR(30)",
+            "matched_recent_real_sample": "INTEGER",
+            "auction_source": "VARCHAR(50)",
+            "auction_ratio_unit": "VARCHAR(20)",
+            "auction_turnover_rate_basis": "VARCHAR(50)",
+            "feature_snapshot_time": "VARCHAR(30)",
+            "feature_json": "TEXT",
+            "label_t0_limit_success": "INTEGER",
+            "label_t1_premium_success": "INTEGER",
+            "label_t1_continue_limit": "INTEGER",
+            "t0_high_return": "FLOAT",
+            "t0_close_return": "FLOAT",
+            "t1_open_return": "FLOAT",
+            "t1_high_return": "FLOAT",
+            "t1_close_return": "FLOAT",
+            "is_t0_limit_up": "INTEGER",
+            "is_t1_limit_up": "INTEGER",
+            "is_t0_one_line_limit_up": "INTEGER",
+            "is_t1_one_line_limit_up": "INTEGER",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
         },
     }
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     with engine.begin() as conn:
+        if "default_auction_training_sample" not in existing_tables:
+            conn.execute(text("""
+                CREATE TABLE default_auction_training_sample (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    trade_date VARCHAR(10) NOT NULL,
+                    ts_code VARCHAR(20) NOT NULL,
+                    name VARCHAR(50),
+                    strategy_name VARCHAR(50) NOT NULL,
+                    strategy_version VARCHAR(50) NOT NULL,
+                    sample_source VARCHAR(30) NOT NULL,
+                    replay_source VARCHAR(30),
+                    matched_recent_real_sample INTEGER,
+                    auction_source VARCHAR(50),
+                    auction_ratio_unit VARCHAR(20),
+                    auction_turnover_rate_basis VARCHAR(50),
+                    feature_snapshot_time VARCHAR(30),
+                    feature_json TEXT NOT NULL,
+                    label_t0_limit_success INTEGER,
+                    label_t1_premium_success INTEGER,
+                    label_t1_continue_limit INTEGER,
+                    t0_high_return FLOAT,
+                    t0_close_return FLOAT,
+                    t1_open_return FLOAT,
+                    t1_high_return FLOAT,
+                    t1_close_return FLOAT,
+                    is_t0_limit_up INTEGER,
+                    is_t1_limit_up INTEGER,
+                    is_t0_one_line_limit_up INTEGER,
+                    is_t1_one_line_limit_up INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uk_default_auction_sample UNIQUE (
+                        strategy_version,
+                        trade_date,
+                        ts_code,
+                        sample_source
+                    )
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_default_auction_training_sample_id ON default_auction_training_sample (id)"))
+            conn.execute(text("CREATE INDEX ix_default_auction_training_sample_trade_date ON default_auction_training_sample (trade_date)"))
+            conn.execute(text("CREATE INDEX ix_default_auction_training_sample_ts_code ON default_auction_training_sample (ts_code)"))
+            conn.execute(text("CREATE INDEX idx_default_auction_sample_date ON default_auction_training_sample (trade_date)"))
+            conn.execute(text("""
+                CREATE INDEX idx_default_auction_sample_labels
+                ON default_auction_training_sample (
+                    label_t0_limit_success,
+                    label_t1_premium_success,
+                    label_t1_continue_limit
+                )
+            """))
+            logger.info("数据库表已补齐: default_auction_training_sample")
+            existing_tables.add("default_auction_training_sample")
+
         if "model_training_job" not in existing_tables:
             conn.execute(text("""
                 CREATE TABLE model_training_job (
@@ -73,7 +162,7 @@ def ensure_runtime_columns(engine) -> None:
                     acceptance_json TEXT,
                     attempts_json TEXT,
                     logs_json TEXT,
-                    best_model_version VARCHAR(50),
+                    best_model_version VARCHAR(255),
                     best_model_path VARCHAR(500),
                     error_message TEXT,
                     started_at DATETIME,

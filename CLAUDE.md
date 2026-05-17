@@ -6,8 +6,8 @@
 |------|-----|
 | **项目名称** | 选股通知系统 (Stock Selector Notification System) |
 | **项目类型** | 量化选股 + AI分析 + 通知推送系统 |
-| **当前版本** | v5.2 (四阶段选股 + AI分析 + 新闻舆情 + 龙虎榜 + 风险拆解 + 龙头战法已完成) |
-| **最后更新** | 2026-05-10 |
+| **当前版本** | v6.0 (四阶段选股 + AI分析 + 新闻舆情 + 龙虎榜 + 风险拆解 + 龙头战法 + 默认竞价接力三目标 + 模型中心已完成) |
+| **最后更新** | 2026-05-17 |
 | **项目成熟度** | ⭐⭐⭐⭐⭐ (5/5 星 - 生产就绪) |
 
 ---
@@ -574,7 +574,132 @@ Phase F: 评分等级分配 + 持久化至 SelectedStock
 | `/api/v1/backtest/auction/sync-range` | POST | 区间竞价同步 |
 | `/api/v1/backtest/tdx-local-daily/sync` | POST | 本地日线同步 |
 
-### 16. 代码规范
+### 16. 默认竞价接力V2与模型中心开发规范
+
+**模块位置**
+- 训练编排: `backend/services/model_engine/default_auction_relay_job_service.py`
+- 单目标训练器: `backend/services/model_engine/default_auction_model_trainer.py`
+- 评估器: `backend/services/model_engine/default_auction_model_evaluator.py`
+- 归因服务: `backend/services/model_engine/default_auction_attribution_service.py`
+- 样本构建: `backend/services/model_engine/default_auction_sample_builder.py`
+- 标签辅助: `backend/services/model_engine/default_auction_label_builder.py`
+- 历史回放: `backend/services/model_engine/default_auction_replay_service.py`
+- 回放验收: `backend/services/model_engine/replay_validation_service.py`
+- 模型管理: `backend/services/model_engine/model_management_service.py`
+- 数据模型: `backend/models/default_auction_training_sample.py` + `backend/models/model_training_job.py`
+- 模型文件: `backend/models/default_auction_{target}_{version}.pkl`
+- API接入: `backend/api/model_management.py`
+- 前端: `frontend/src/views/ModelCenter.vue`
+
+**定位**: 基于LightGBM的默认竞价接力三目标预测系统。三模型分别预测T+0封板、T+1溢价、T+1连板，支持多参数配置轮训、自动验收闸门、原子激活。纯结构化特征(来自SelectedStock)，不引入新闻/公告/舆情/AI文本。
+
+**三目标模型**:
+
+| 子模型 | 模型名 | 标签列 | Top3 Lift | Top5 Lift | TopK正例 | AUC |
+|--------|--------|--------|-----------|-----------|---------|-----|
+| T+0封板 | `default_auction_t0_limit_lgbm` | `label_t0_limit_success` | ≥0.08 | ≥0.05 | ≥20 | ≥0.55 |
+| T+1溢价 | `default_auction_t1_premium_lgbm` | `label_t1_premium_success` | ≥0.10 | ≥0.06 | ≥25 | ≥0.55 |
+| T+1连板 | `default_auction_t1_continue_lgbm` | `label_t1_continue_limit` | ≥0.06 | ≥0.04 | ≥10 | ≥0.53 |
+
+**14维特征** (`DEFAULT_AUCTION_FEATURES`):
+```python
+DEFAULT_AUCTION_FEATURES = [
+    "auction_ratio",          # 竞昨比
+    "auction_turnover_rate",  # 竞价换手率
+    "open_change_pct",        # 开盘涨幅
+    "pre_change_pct",         # 昨涨幅
+    "limit_up_count",         # 涨停次数
+    "touch_days",             # 触板天数
+    "limit_up_days",          # 涨停天数
+    "seal_rate",             # 封板率
+    "rise_10d_pct",           # 近10日涨幅
+    "circ_mv",               # 流通市值
+    "prev_turnover_rate",     # 昨日换手率
+    "rule_score",            # 规则评分
+    "final_score",           # 最终评分
+    "risk_tags_count",       # 风险标签数
+]
+```
+
+特征提取来源: 只读 `SelectedStock` 的结构化字段(18个 `FEATURE_FIELDS`)，纯结构化，不引入文本特征。
+
+分类特征: `score_level`, `lu_tag`, `lu_status` → 自动 `ignored`，不进训练。
+
+**三目标标签定义**:
+
+T+0封板: 非一字板 + high≥limit×0.997 + close≥limit×0.997 → label=1，数据缺失→None
+
+T+1溢价: T+1开盘≥3% 或 最高≥5% 或 收盘≥3% → label=1，数据全缺→None
+
+T+1连板: T+1 high≥limit×0.997 + close≥limit×0.997 → label=1，数据缺失→None
+
+一字板审计: `is_t0_one_line_limit_up` / `is_t1_one_line_limit_up` → 开/高/低/收全部≥涨停价×0.997
+
+**5种参数配置** (`DEFAULT_PARAM_PROFILES`):
+
+| 配置名 | lr | leaves | max_depth | reg_α | reg_λ | subsample | n_est |
+|--------|-----|--------|-----------|-------|-------|-----------|-------|
+| balanced_default | 0.05 | 31 | -1 | 0 | 0 | 0.8 | 500 |
+| conservative_regularized | 0.03 | 15 | 4 | 0.1 | 1.0 | 0.75 | 500 |
+| shallow_stable | 0.04 | 7 | 3 | 0.2 | 2.0 | 0.9 | 500 |
+| wider_ranker | 0.02 | 63 | 6 | 0.05 | 0.5 | 0.8 | 700 |
+| seed_retry | 0.03 | 15 | 4 | 0.1 | 1.0 | 0.75 | 500 |
+
+全部 `is_unbalance=True`, `early_stopping_rounds=50`。
+
+**训练流程** (6阶段):
+```
+1. 样本查询 → label_column IS NOT NULL + 日期区间
+2. 特征质量 → build_feature_quality_report → usable_features
+3. 时间切分 → trade_date 排序 70/15/15
+4. 训练模型 → LGBMClassifier(is_unbalance=True)
+5. TopK评估 → 按交易日分桶取每日top1/top3/top5
+6. 验收闸门 → judge_target_acceptance
+```
+
+**TopK评估**: 按交易日分组，取每日概率降序 top1/top3/top5，计算各层正例率相对baseline_rate的lift。未知标签样本不进基准、胜率和TopK排名。
+
+**训练任务编排**: `create_job → run_job → 逐目标轮训参数配置 → 全部通过验收 → (auto_activate?→原子激活 : passed)。任一目标未通过→rejected。异常→failed。
+
+**原子激活**: 三模型最新通过版本预校验(版本存在+文件存在) → deactivate旧版本 → 激活新版本。校验不通过→rejected。
+
+**回放验收**: real_codes vs replay_codes → daily recall/jaccard/count_error → min_avg_recall≥0.80 + min_avg_jaccard≥0.60 + max_count_error≤0.30 + 无重复代码 → accepted
+
+**模型中心API** (基路径 `/api/v1/model`):
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/models` | GET | 活跃模型/特征/指标 |
+| `/models/default-auction-replay/validate` | POST | 回放验收 |
+| `/models/default-auction-samples/build` | POST | 构建训练样本 |
+| `/models/default-auction-relay/train` | POST | 训练三目标(后台) |
+| `/models/default-auction-relay/diagnostics/{job_id}` | GET | 训练诊断 |
+| `/models/{model_name}/versions/{version}/activate` | POST | 激活版本 |
+| `/models/{model_name}/training-jobs` | POST | 创建训练任务 |
+| `/models/training-jobs/{job_id}` | GET | 任务状态 |
+| `/models/{model_name}/refresh-predictions` | POST | 刷新预测 |
+
+**SelectedStock新增预测字段**:
+| 字段 | 来源模型 |
+|------|---------|
+| `default_t0_limit_prob` | T+0封板概率 |
+| `default_t1_premium_prob` | T+1溢价概率 |
+| `default_t1_continue_prob` | T+1连板概率 |
+| `default_relay_score` | 综合评分 |
+| `default_relay_model_version` | 版本号 |
+
+**降级策略**: 模型文件或依赖缺失→预测值返回None。预测指标仅作排序参考，不构成投资建议。
+
+**⚠️ 注意事项**:
+- 特征提取只读SelectedStock结构化字段，不要引入news/announcement/sentiment/AI文本
+- `is_unbalance=True` 压低概率输出，验收看TopK lift而非绝对概率
+- 分类特征(score_level/lu_tag/lu_status)自动过滤，不要当数值特征传入
+- `build_samples_from_selected_record` 按唯一约束upsert，不要直接merge
+- 三目标训练串行执行，每个目标独立记录状态和日志
+- 训练前确保标签非空样本≥50
+- 回放验收仅比较代码集合，不比较排序
+- 模型文件路径: `backend/models/{model_name}_{version}.pkl`
+
+### 17. 代码规范
 
 **Python 代码规范**
 - **Style Guide**: PEP 8
@@ -610,7 +735,7 @@ Phase F: 评分等级分配 + 持久化至 SelectedStock
 
 ## 常见问题与解决方案
 
-### 17. 故障排查指南
+### 18. 故障排查指南
 
 **Q1: MCP接口返回0条记录?**
 ```bash
@@ -681,11 +806,32 @@ Tushare `top_inst` 接口可能需要5000积分，积分不足时返回空数据
 - `RuleScoreService.score_auction_momentum` 阈值也需同步更新（>=0.20, >=0.10, >=0.05, >=0.03）
 - 候选股为0只的常见原因：竞昨比格式与过滤器阈值不匹配
 
+**Q15: 默认竞价接力训练任务创建后状态一直是pending?**
+- 检查 `run_default_auction_relay_training_job` 是否被 `BackgroundTasks` 正常调度
+- 检查 `default_auction_training_sample` 表中是否有标签非空的训练样本(≥MIN_TRAINING_SAMPLES=50)
+- 查看任务日志: `GET /api/v1/model/models/default-auction-relay/diagnostics/{job_id}`
+
+**Q16: 默认竞价接力模型训练后验收未通过?**
+- 查看 `acceptance_json` 中的 `reject_reasons` 字段，判断是哪个验收指标不达标
+- TopK正例数不足: 检查正负样本比例，正例太少无法产生足够topk正例
+- AUC低于阈值: 尝试增加训练样本量或切换参数配置
+- TopK Lift不足: 模型排序能力弱，可能需要更多特征工程或更大样本量
+
+**Q17: 回放验收不通过?**
+- 检查 `reject_reasons`: avg_recall_below_threshold / avg_jaccard_below_threshold / daily_count_error_above_threshold / duplicate_codes_detected
+- 检查回放数据源是否与真实选股使用相同的策略参数
+- 检查重复代码: real_codes 或 replay_codes 中有重复的 ts_code
+
+**Q18: 原子激活失败?**
+- 检查 `activation.reject_reasons`: missing_version / version_not_found / model_file_missing
+- 确认三目标的最新通过版本在 `model_version` 表中存在且 `model_path` 可访问
+- 确认文件系统中模型文件未被人为删除或移动
+
 ---
 
 ## 开发工作流
 
-### 18. 开发流程
+### 19. 开发流程
 
 **1. 环境准备**
 - 后端: `pip install -r requirements.txt`
@@ -724,7 +870,7 @@ feat(board): 实现东财板块动态别名
 
 ## 性能与安全
 
-### 19. 性能规范
+### 20. 性能规范
 
 **API 性能**
 - **Response Time**: 选股 API < 30 秒
@@ -770,8 +916,11 @@ feat(board): 实现东财板块动态别名
 - 全管线(竞价同步→训练, ~500交易日): ~50分钟（瓶颈在Tushare API逐日调用）
 - 模型文件加载: <100ms (joblib)
 - SHAP解释(单预测): <10ms
+- 默认接力单目标训练(2000+样本, 14特征): <5秒
+- 默认接力三目标全管线: <30秒
+- 回放验收(5日): <5秒
 
-### 20. 安全规范
+### 21. 安全规范
 
 **敏感信息管理**
 - **Environment Variables**: 使用 `.env` 文件 (不提交到 Git)
@@ -792,7 +941,7 @@ feat(board): 实现东财板块动态别名
 
 ## 监控与维护
 
-### 21. 监控指标
+### 22. 监控指标
 
 **Prometheus 指标**:
 - `http_requests_total` (Counter)
@@ -828,7 +977,14 @@ feat(board): 实现东财板块动态别名
 - 预测覆盖率（`t0_limit_success_prob` 非空比例）
 - 模型文件大小与加载耗时
 
-### 22. 日志规范
+**默认竞价接力模型监控**:
+- `model_training_job` 表任务状态分布(pending/running/passed/rejected/failed)
+- `default_auction_training_sample` 表样本量/正负比例/标签覆盖率
+- 三目标模型AUC/TopK Lift趋势
+- 默认接力预测字段非空比例
+- 回放验收指标趋势(avg_recall/avg_jaccard/daily_count_error)
+
+### 23. 日志规范
 
 **双格式输出**:
 - `logs/xuangu.json` - JSON格式 (适合日志聚合工具)
@@ -865,7 +1021,7 @@ feat(board): 实现东财板块动态别名
 
 ## 部署与运维
 
-### 23. 部署架构
+### 24. 部署架构
 
 **直接部署 (Supervisor + Nginx)**
 
@@ -936,6 +1092,6 @@ AI_TIMEOUT=30
 
 **这些指南有效的标志：** 差异中不必要的修改更少了，因过度复杂而重写的情况更少了，澄清问题出现在实现之前而不是出错之后。
 
-**Last Updated**: 2026-05-10
+**Last Updated**: 2026-05-17
 **Maintainer**: AI Assistant
-**Version**: 9.0
+**Version**: 10.0

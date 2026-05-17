@@ -118,6 +118,30 @@
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
+              <th @click="sortBy('default_t0_limit_prob')" class="sortable relay-prob-col">
+                T+0涨停概率
+                <span v-if="sortField === 'default_t0_limit_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_t1_premium_prob')" class="sortable relay-prob-col">
+                T+1高溢价概率
+                <span v-if="sortField === 'default_t1_premium_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_t1_continue_prob')" class="sortable relay-prob-col">
+                T+1连板概率
+                <span v-if="sortField === 'default_t1_continue_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_relay_score')" class="sortable relay-score-col">
+                接力分
+                <span v-if="sortField === 'default_relay_score'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
               <th @click="sortBy('leader_strength_score')" class="sortable">
                 强度
                 <span v-if="sortField === 'leader_strength_score'" class="sort-icon">
@@ -160,6 +184,18 @@
                 <span class="model-label">T0</span>
                 <span>{{ formatPct(stock.t0_limit_success_prob) }}</span>
               </td>
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock)">
+                {{ formatPercentScore(stock.default_t0_limit_prob) }}
+              </td>
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock)">
+                {{ formatPercentScore(stock.default_t1_premium_prob) }}
+              </td>
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock)">
+                {{ formatPercentScore(stock.default_t1_continue_prob) }}
+              </td>
+              <td class="num-cell relay-score" :title="defaultRelayTitle(stock)">
+                {{ formatScore(stock.default_relay_score) }}
+              </td>
               <td class="num-cell">{{ stock.leader_strength_score ?? '--' }}</td>
               <td class="num-cell">{{ stock.retreat_risk_score ?? '--' }}</td>
               <td class="reasons-cell">
@@ -178,10 +214,10 @@
             <!-- 涨停/换手率标签行 -->
               <tr v-if="hasEnrichData(stock)" class="enrich-row">
                 <td colspan="5" class="enrich-cell"><span class="enrich-tag lu-desc">{{ stock.lu_desc || '--' }}</span></td>
-                <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
-                <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
-                <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag open-num">炸板{{ stock.lu_open_num != null ? stock.lu_open_num : 0 }}次</span></td>
-                <td colspan="3" class="enrich-cell"><span class="enrich-tag suc-rate">近一年封板率{{ fmtRate(stock.limit_up_suc_rate) }}</span></td>
+                <td colspan="4" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
+                <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
+                <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag open-num">炸板{{ stock.lu_open_num != null ? stock.lu_open_num : 0 }}次</span></td>
+                <td colspan="4" class="enrich-cell"><span class="enrich-tag suc-rate">近一年封板率{{ fmtRate(stock.limit_up_suc_rate) }}</span></td>
                 <td colspan="2" class="enrich-cell"><span class="enrich-tag turnover">昨日换手{{ formatPct(stock.prev_turnover_rate) }}</span></td>
               </tr>
             </template>
@@ -461,11 +497,18 @@ function statusText(s) {
 
 function formatNum(v) { return v != null ? Number(v).toFixed(2) : '--' }
 function formatPct(v) { return v != null ? Number(v).toFixed(2) + '%' : '--' }
+function formatPercentScore(v) { return v != null ? Number(v).toFixed(1) + '%' : '--' }
+function formatScore(v) { return v != null ? Number(v).toFixed(1) : '--' }
 function formatTime(t) { if (!t) return '--'; return t.replace('T', ' ').substring(0, 19) }
 
 function lightGbmTitle(stock) {
   const version = stock.t0_limit_success_model_version || '未启用模型'
   return `LightGBM T+0封板概率模型：${version}`
+}
+
+function defaultRelayTitle(stock) {
+  const version = stock.default_relay_model_version || '未启用默认接力组合模型'
+  return `默认竞价接力 V2：${version}`
 }
 
 function fmtRate(v) {
@@ -635,9 +678,19 @@ function isLimitUp(stock) {
 .num-cell.highlight { color: #ff4d4f; font-weight: 700; }
 .num-cell.score-cell { color: #667eea; font-weight: 700; }
 .lightgbm-col { min-width: 88px; }
+.relay-prob-col { min-width: 110px; }
+.relay-score-col { min-width: 76px; }
 .lightgbm-prob {
   color: #08979c;
   font-weight: 700;
+}
+.relay-prob {
+  color: #1d4ed8;
+  font-weight: 700;
+}
+.relay-score {
+  color: #b45309;
+  font-weight: 800;
 }
 .model-label {
   display: inline-block;
