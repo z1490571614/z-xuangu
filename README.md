@@ -200,7 +200,6 @@ python test_detail_page.py
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/v1/model/status` | 获取所有活跃模型版本、特征列、评估指标 |
 | POST | `/api/v1/backtest/leader-main-t0/run` | 一键执行T+0回测管线(竞价同步→特征→标签→训练) |
 | POST | `/api/v1/backtest/leader-main-t0/build` | 构建候选股训练样本 |
 | POST | `/api/v1/backtest/leader-main-t0/labels` | 生成T+0涨停标签 |
@@ -322,37 +321,19 @@ python test_detail_page.py
 
 ### LightGBM竞价模型（多模型架构）
 
-系统包含多套LightGBM模型，服务不同场景：
+| 模型 | 模型名 | 维数 | 用途 | 评分权重 |
+|------|--------|------|------|----------|
+| 竞价通用 | `active_auction_lgbm` | 8 | 竞价活跃度+封板率+趋势 | final_score ×35% |
+| 龙头T+0 | `leader_main_t0_lgbm` | 9 | 龙头股T+0封板概率 | final_score ×10% |
+| 默认接力T+0 | `default_auction_t0_limit_lgbm` | 14 | T日封板概率 | 独立展示 |
+| 默认接力T+1溢价 | `default_auction_t1_premium_lgbm` | 14 | T+1溢价概率 | 独立展示 |
+| 默认接力T+1连板 | `default_auction_t1_continue_lgbm` | 14 | T+1连板概率 | 独立展示 |
 
-| 模型 | 模型名 | 特征数 | 用途 | 影响评分 |
-|------|--------|--------|------|----------|
-| 竞价通用模型 | `active_auction_lgbm` | 8维 | 竞价活跃度+封板率+趋势综合评分 | ✅ `final_score` 中占35%权重 |
-| 龙头T+0模型 | `leader_main_t0_lgbm` | 9维 | 龙头股T+0封板概率预测 | ✅ `final_score` 中占10%权重 |
-| 默认竞价接力V2 | 三目标模型组 | 14维 | 默认策略候选股的T0/T1/T1连板预测 | ❌ 独立预测展示 |
+**三目标模型验收闸门**: Top3/Top5 Lift + TopK正例数 + AUC，三目标全部通过后原子激活。
 
-**默认竞价接力V2（三目标模型）**:
-	
-| 子模型 | 模型名 | 预测目标 | 验收闸门 |
-|--------|--------|---------|---------|
-| T+0封板模型 | `default_auction_t0_limit_lgbm` | T日封板成功概率 | Top3 Lift≥0.08, Top5 Lift≥0.05, AUC≥0.55 |
-| T+1溢价模型 | `default_auction_t1_premium_lgbm` | T+1开盘/高点/收盘任一溢价≥3% | Top3 Lift≥0.10, Top5 Lift≥0.06, AUC≥0.55 |
-| T+1连板模型 | `default_auction_t1_continue_lgbm` | T+1封板连板成功概率 | Top3 Lift≥0.06, Top5 Lift≥0.04, AUC≥0.53 |
-	
-**默认竞价接力V2特征（14维）**:
-`auction_ratio`(竞昨比), `auction_turnover_rate`(竞价换手率), `open_change_pct`(开盘涨幅), `pre_change_pct`(昨涨幅), `limit_up_count`(涨停次数), `touch_days`(触板天数), `limit_up_days`(涨停天数), `seal_rate`(封板率), `rise_10d_pct`(近10日涨幅), `circ_mv`(流通市值), `prev_turnover_rate`(昨日换手率), `rule_score`(规则评分), `final_score`(最终评分), `risk_tags_count`(风险标签数)
-	
-**训练特色**: 5种参数配置轮训(balanced/ conservative/ shallow/ wider/ seed_retry) → 自动验收闸门 → 三目标原子激活 → 训练诊断归因(SHAP+分桶)
-	
-**龙头T+0模型特征（9维）**:
-`limit_up_streak`(连板数), `limit_up_count_100d`, `seal_rate_100d`, `rise_10d_pct`, `pre_change_pct`, `open_change_pct`, `auction_ratio`(竞昨比), `auction_turnover_rate`(竞价换手率), `circ_mv`(流通市值)
-	
-**T+0标签定义**: 非一字板 + 最高价触及涨停价 + 收盘封死涨停 → `label=1`(成功)；一字板(开/高/低/收全部接近涨停价) → `label=None`(排除出训练集)
-	
-**训练管线**: 集合竞价数据同步 → 日线数据同步 → 竞昨比重算 → 候选股特征构建 → 标签生成 → 模型训练(时间顺序70/15/15分割+TopK评估) → 版本化持久化 → 批量预测集成至选股管线
-	
-**模型管理**: 每次训练自动版本化(`{model_name}_{version}.pkl`)，DB记录特征列/评估指标/训练日期区间，`is_active`标记活跃版本，`/api/v1/model/models` 可查询所有活跃模型状态
-	
-**降级策略**: 模型文件缺失或 `joblib`/`lightgbm` 不可用时，预测值返回 `None`，不影响核心选股流程，规则评分独立运行
+**训练特色**: 5种参数配置轮训 → 自动验收闸门 → 原子激活 → 诊断归因(SHAP+分桶)。
+
+**降级策略**: 模型文件缺失或 `joblib`/`lightgbm` 不可用时预测返回 `None`，不影响核心选股。
 
 ---
 
@@ -442,131 +423,35 @@ pytest tests/ -v --cov=backend
 ```
 /opt/xuangu/
 │
-├── backend/                               # 后端代码(FastAPI)
-│   ├── main.py                           # 应用入口(含启动时板块词典/别名同步)
-│   ├── models/                           # 数据模型
-│   │   ├── stock_lhb.py                 # 龙虎榜数据
-│   │   ├── stock_risk.py                # 风险拆解+龙头战法评分(DragonLeaderScore)
-│   │   ├── board.py                     # 东财板块+动态别名(DcBoardAlias等)
-│   │   ├── stock_ths_board.py           # 同花顺板块
-│   │   ├── anomaly_interpretation.py    # 异动解读
-│   │   ├── overview_brief.py            # AI综合概览
-│   │   ├── selected_stock.py            # 选股结果(含LightGBM预测字段)
-│   │   ├── auction_backtest.py          # 竞价回测样本+训练样本ORM
-│   │   ├── model_training_job.py        # 模型训练任务(状态/阶段/验收)
-│   │   ├── default_auction_training_sample.py  # 默认竞价接力训练样本(14维+3标签)
-│   │   ├── model_version.py             # 模型版本管理
-│   │   └── scoring_v2/                  # 评分V3模型
-│   ├── api/                              # API路由
-│   │   ├── stock_detail.py              # 个股详情API(含龙虎榜/风险拆解/龙头战法)
-│   │   ├── stock.py                     # 选股API
-│   │   ├── score_v2.py                  # 评分V2/V3 API
-│   │   ├── anomaly.py                   # 异动解读API
-│   │   ├── overview_brief.py            # AI综合概览API
-│   │   ├── model_management.py          # 模型中心API(训练/激活/诊断/回放验收)
-│   │   └── news_v2.py                   # 新闻舆情API
-│   ├── services/                         # 业务逻辑
-│   │   ├── lhb_service.py              # 龙虎榜服务
-│   │   ├── seat_library.py             # 统一席位库(高溢价/核按钮/量化/机构/散户)
-│   │   ├── risk_breakdown_service.py   # 风险拆解服务(含龙头战法证据链)
-│   │   ├── sentiment_analyzer.py       # 新闻情感分析V1(加权评分规则引擎)
-│   │   ├── anomaly_interpretation/     # 异动解读服务
-│   │   ├── integrated_news_service.py  # 集成新闻服务
-│   │   ├── news_collector.py           # 新闻采集器
-│   │   ├── news_sentiment/             # 新闻情感分析V2(事件驱动,纯规则,不绑策略)
-│   │   │   ├── analyzer.py             # 主入口(单条/批量分析)
-│   │   │   ├── event_classifier.py     # 事件分类器
-│   │   │   ├── fact_extractor.py       # 事实抽取(业绩/减持/回购等)
-│   │   │   ├── scorer.py               # 事件评分+多事件合并
-│   │   │   ├── confidence.py           # 置信度计算
-│   │   │   ├── news_scope.py           # 新闻范围分类(单股/多股/市场)
-│   │   │   ├── normalizer.py           # 文本标准化
-│   │   │   └── rules/                   # 各事件类型规则
-│   │   ├── dragon_leader/              # 龙头战法评分系统
-│   │   │   ├── main.py                 # 主流程(数据采集+评分+持久化)
-│   │   │   ├── lhb_alpha.py            # 龙虎榜席位Alpha评分
-│   │   │   ├── output.py               # 输出组装(等级/周期/证据/观察点)
-│   │   │   ├── data/                    # 上下文采集器
-│   │   │   │   ├── stock_context.py    # 个股上下文
-│   │   │   │   ├── market_context.py   # 市场上下文
-│   │   │   │   ├── theme_context.py    # 题材上下文(含语义引用板块)
-│   │   │   │   ├── fundamental_context.py # 基本面上下文
-│   │   │   │   └── intraday_context.py # 分时上下文
-│   │   │   └── scorer/                  # 评分器
-│   │   │       ├── leader_scorer.py    # 龙头强度(7维)
-│   │   │       ├── retreat_scorer.py   # 退潮风险(7维)
-│   │   │       └── announcement_alpha.py # 公告消息Alpha
-│   │   ├── dc_board_service.py         # 东财板块词典维护
-│   │   ├── dc_board_alias_service.py   # 东财板块动态别名(涨停标签→板块)
-│   │   ├── stock_alias_service.py      # 股票别名服务
-│   │   ├── ai_brief/                    # AI综合概览服务
-│   │   ├── stock_selector.py           # 四阶段选股协调
-│   │   ├── scoring_v2/                 # 评分V3服务
-│   │   ├── model_engine/               # LightGBM模型引擎
-│   │   │   ├── lightgbm_service.py     # 训练+预测+版本管理+双模型
-│   │   │   ├── model_management_service.py  # 模型中心(训练任务+版本激活+预测刷新)
-│   │   │   ├── default_auction_relay_job_service.py  # 默认竞价接力三目标训练编排
-│   │   │   ├── default_auction_model_trainer.py      # 默认竞价接力单目标训练器
-│   │   │   ├── default_auction_model_evaluator.py    # TopK评估+验收闸门
-│   │   │   ├── default_auction_attribution_service.py # 特征质量+分桶归因
-│   │   │   ├── default_auction_sample_builder.py     # 训练样本构建
-│   │   │   ├── default_auction_label_builder.py      # 三目标标签辅助
-│   │   │   ├── default_auction_replay_service.py     # 历史回放入口
-│   │   │   └── replay_validation_service.py          # 回放验收(召回率/Jaccard)
-│   │   ├── backtest/                   # 回测管线
-│   │   │   ├── leader_main_t0_feature_builder.py  # 特征构建+候选过滤
-│   │   │   └── leader_main_t0_label_builder.py    # T+0标签生成
-│   │   └── strategy/                   # 策略服务
+├── backend/
+│   ├── main.py                    # 应用入口
+│   ├── models/                    # 数据模型 (ORM, 30+表)
+│   ├── api/                       # REST API 路由
+│   ├── services/
+│   │   ├── stock_selector.py     # 四阶段选股协调器
+│   │   ├── scoring_v2/           # Alpha评分 + 决策引擎
+│   │   ├── model_engine/         # LightGBM多模型引擎
+│   │   ├── dragon_leader/        # 龙头战法评分
+│   │   ├── news_sentiment/       # 事件驱动情感分析V2
+│   │   ├── lhb_service.py        # 龙虎榜
+│   │   ├── risk_breakdown_service.py  # 风险拆解(7维度)
+│   │   └── ...                   # 20+ 服务模块
 │   └── utils/
-│       └── trading_date.py            # 交易日工具
 │
-├── frontend/                            # 前端代码(Vue 3)
-│   ├── src/components/
-│   │   ├── StockDetailDrawer.vue       # 个股详情抽屉(9个Tab)
-│   │   └── stock/
-│   │       ├── LhbPanel.vue            # 龙虎榜
-│   │       ├── RiskBreakdown.vue       # 风险拆解(支持龙头战法双模式)
-│   │       ├── AnomalyInterpretation.vue # 异动解读
-│   │       ├── OverviewBrief.vue       # 综合概览
-│   │       └── ...                     # 其他Tab组件
+├── frontend/                     # Vue 3 + Vite
 │   ├── src/views/
-│   │   ├── ModelCenter.vue              # 模型中心(训练任务/版本管理/诊断/回放验收)
-│   │   └── StockResults.vue             # 选股结果列表(含默认接力预测列)
+│   │   ├── ModelCenter.vue       # 模型中心
+│   │   └── StockResults.vue      # 选股结果(含多模型预测列)
+│   └── src/components/stock/     # 个股详情Tab组件(9个)
 │
-├── scripts/                             # 脚本工具
-│   ├── generate_dc_board_aliases.py    # 板块别名生成
-│   ├── migrate_dc_board_alias_tables.py # 别名表迁移
-│   └── migrate_risk_context_fields.py  # 风险上下文字段迁移
-│
-├── tests/                               # 测试
-│   ├── backend/unit/
-│   │   ├── test_leader_main_t0_lightgbm.py  # LightGBM训练/预测测试
-│   │   ├── test_leader_main_t0_feature_builder.py # 特征构建测试
-│   │   ├── test_leader_main_t0_label_builder.py  # 标签生成测试
-│   │   ├── test_model_status_api.py      # 模型状态API测试
-│   │   ├── test_stock_api_t0_model_fields.py  # T+0字段API测试
-│   │   ├── test_default_auction_model_trainer.py     # 默认接力模型训练器测试
-│   │   ├── test_default_auction_model_evaluator.py   # 默认接力模型评估器测试
-│   │   ├── test_default_auction_attribution_service.py # 默认接力归因服务测试
-│   │   ├── test_default_auction_training_sample.py   # 默认接力训练样本测试
-│   │   ├── test_default_auction_model_management_api.py # 模型中心API测试
-│   │   ├── test_default_auction_replay_validation.py  # 回放验收测试
-│   │   ├── test_dragon_leader.py         # 龙头战法评分测试
-│   │   ├── test_dragon_leader_e2e.py     # 龙头战法端到端测试
-│   │   ├── test_dc_board_service.py      # 东财板块服务测试
-│   │   ├── test_dc_board_alias_service.py   # 板块别名服务测试
-│   │   ├── test_dc_board_alias_generation.py # 板块别名生成测试
-│   │   ├── test_lhb_seat_effectiveness.py    # 席位有效性测试
-│   │   ├── test_risk_breakdown_persistence.py # 风险拆解持久化测试
-│   │   └── ...                           # 其他测试
-│   └── frontend/e2e/
-│       ├── lightgbm-results.spec.js                # LightGBM结果页e2e测试
-│       └── default-auction-relay-model-center.spec.js  # 默认接力模型中心e2e测试
-│
-├── AGENTS.md                            # 架构文档
-├── CLAUDE.md                            # 开发指南
-└── README.md                            # 本文档
+├── tests/                        # pytest + Playwright e2e
+├── scripts/                      # 数据维护脚本
+├── AGENTS.md                     # 架构文档 (完整模块说明)
+├── CLAUDE.md                     # 开发指南 (编码规范+故障排查)
+└── README.md                     # 本文档
 ```
+
+> 完整目录树及模块详情见 [AGENTS.md](AGENTS.md)。
 
 ---
 
@@ -599,6 +484,6 @@ MIT License
 
 ---
 
-**文档版本**: v10.0
-**最后更新**: 2026-05-17
+**文档版本**: v11.0
+**最后更新**: 2026-05-18
 **维护者**: AI Assistant
