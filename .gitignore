@@ -55,6 +55,13 @@ Testing
 .coverage
 htmlcov/
 .tox/
+.playwright-cli/
+
+Cache
+__pycache__/
+
+Output
+output/
 
 MyPy
 .mypy_cache/

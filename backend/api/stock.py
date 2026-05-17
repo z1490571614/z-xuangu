@@ -27,6 +27,10 @@ T0_MODEL_DISCLAIMER = "T+0成功率由历史样本模型估算，仅作排序参
 _tdx_mcp_func = None
 
 
+def _float_or_none(value):
+    return float(value) if value is not None else None
+
+
 def set_tdx_mcp_func(func):
     """设置通达信 MCP 函数"""
     global _tdx_mcp_func
@@ -268,11 +272,16 @@ async def get_selection_detail(
                 "industry": stock.industry or fallback.get("industry"),
                 "concept": stock.concept or fallback.get("concept"),
                 "board_type": stock.board_type or fallback.get("board_type"),
-                "rule_score": float(stock.rule_score) if stock.rule_score else None,
-                "model_score": float(stock.model_score) if stock.model_score else None,
-                "t0_limit_success_prob": float(stock.t0_limit_success_prob) if stock.t0_limit_success_prob else None,
+                "rule_score": _float_or_none(stock.rule_score),
+                "model_score": _float_or_none(stock.model_score),
+                "t0_limit_success_prob": _float_or_none(stock.t0_limit_success_prob),
                 "t0_limit_success_model_version": stock.t0_limit_success_model_version,
-                "final_score": float(stock.final_score) if stock.final_score else None,
+                "default_t0_limit_prob": _float_or_none(stock.default_t0_limit_prob),
+                "default_t1_premium_prob": _float_or_none(stock.default_t1_premium_prob),
+                "default_t1_continue_prob": _float_or_none(stock.default_t1_continue_prob),
+                "default_relay_score": _float_or_none(stock.default_relay_score),
+                "default_relay_model_version": stock.default_relay_model_version,
+                "final_score": _float_or_none(stock.final_score),
                 "score_level": stock.score_level,
                 "reasons": stock.reasons.split("; ") if stock.reasons else [],
                 "risk_tags": _json.loads(stock.risk_tags) if stock.risk_tags else [],
@@ -288,10 +297,10 @@ async def get_selection_detail(
                 "lu_tag": stock.lu_tag or fallback.get("lu_tag"),
                 "lu_status": stock.lu_status or fallback.get("lu_status"),
                 "lu_open_num": stock.lu_open_num if stock.lu_open_num is not None else fallback.get("lu_open_num"),
-                "limit_up_suc_rate": float(stock.limit_up_suc_rate) if stock.limit_up_suc_rate else fallback.get("limit_up_suc_rate"),
+                "limit_up_suc_rate": _float_or_none(stock.limit_up_suc_rate) if stock.limit_up_suc_rate is not None else fallback.get("limit_up_suc_rate"),
                 "latest_lu_date": stock.latest_lu_date or fallback.get("latest_lu_date"),
                 # 上一日换手率
-                "prev_turnover_rate": float(stock.prev_turnover_rate) if stock.prev_turnover_rate else None,
+                "prev_turnover_rate": _float_or_none(stock.prev_turnover_rate),
             })
 
         result = {

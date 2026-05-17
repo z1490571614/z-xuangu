@@ -1,6 +1,7 @@
 from backend.services.model_engine.default_auction_attribution_service import (
     build_bucket_report,
     build_feature_quality_report,
+    build_single_prediction_attribution,
     build_training_attribution,
 )
 
@@ -46,6 +47,22 @@ def test_feature_quality_report_empty_rows_returns_stable_structure():
     assert report["usable_features"] == []
     assert report["dropped_features"] == ["auction_ratio"]
     assert report["features"]["auction_ratio"]["missing_rate"] == 1.0
+
+
+def test_feature_quality_report_includes_source_label_and_date_coverage():
+    rows = [
+        {"trade_date": "20260508", "sample_source": "real_selected", "auction_ratio": 8.1, "label": 1},
+        {"trade_date": "20260508", "sample_source": "replay_backtest", "auction_ratio": 12.0, "label": 0},
+        {"trade_date": "20260509", "sample_source": "replay_backtest", "auction_ratio": 60.0, "label": 1},
+    ]
+
+    report = build_feature_quality_report(rows, ["auction_ratio"])
+
+    assert report["source_mix_ratio"] == {"real_selected": 0.3333, "replay_backtest": 0.6667}
+    assert report["positive_negative_ratio"] == {"positive": 2, "negative": 1, "positive_rate": 0.6667}
+    assert report["coverage_by_date"] == {"20260508": 2, "20260509": 1}
+    assert report["features"]["auction_ratio"]["outlier_count"] == 1
+    assert report["features"]["auction_ratio"]["outlier_rate"] == 0.3333
 
 
 def test_bucket_report_outputs_lift_for_auction_ratio():
@@ -121,3 +138,36 @@ def test_training_attribution_summarizes_success_and_failure():
     assert attribution["best_buckets"][0]["bucket"] == "8-15"
     assert "top3_lift_below_threshold" in attribution["failure_reasons"]
     assert "Top3提升不足" in attribution["failure_summary"]
+
+
+def test_single_prediction_attribution_splits_positive_negative_and_bucket_explanations():
+    result = build_single_prediction_attribution(
+        probability=72.5,
+        model_version="v1",
+        features={"auction_ratio": 10.0, "auction_turnover_rate": 12.0, "seal_rate": 85},
+        feature_contributions={"auction_ratio": 0.32, "auction_turnover_rate": -0.18, "seal_rate": 0.0},
+        bucket_report=[
+            {
+                "feature_name": "auction_ratio",
+                "bucket": "8-15",
+                "lift": 0.2,
+                "conclusion": "高于基准",
+            },
+            {
+                "feature_name": "auction_turnover_rate",
+                "bucket": "10+",
+                "lift": -0.1,
+                "conclusion": "不高于基准",
+            },
+        ],
+        data_quality_warnings=["auction_turnover_rate_outlier"],
+    )
+
+    assert result["probability"] == 72.5
+    assert result["model_version"] == "v1"
+    assert any("auction_ratio" in item for item in result["positive_factors"])
+    assert any("auction_turnover_rate" in item for item in result["negative_factors"])
+    assert any("seal_rate" in item for item in result["neutral_factors"])
+    assert result["feature_contributions"]["auction_ratio"] == 0.32
+    assert len(result["bucket_explanations"]) == 2
+    assert result["data_quality_warnings"] == ["auction_turnover_rate_outlier"]

@@ -24,6 +24,14 @@ def _find_duplicates(codes: List[str]) -> List[str]:
     return sorted(code for code, count in Counter(codes).items() if count > 1)
 
 
+def _top_overlap(real_codes: List[str], replay_codes: List[str], k: int) -> float:
+    real_top = set(real_codes[:k])
+    replay_top = set(replay_codes[:k])
+    if not real_top and not replay_top:
+        return 0.0
+    return _round_rate(len(real_top & replay_top) / k)
+
+
 def compare_daily_lists(trade_date: str, real_codes: List[str], replay_codes: List[str]) -> Dict[str, Any]:
     real_set = set(real_codes)
     replay_set = set(replay_codes)
@@ -49,6 +57,8 @@ def compare_daily_lists(trade_date: str, real_codes: List[str], replay_codes: Li
         "precision": _round_rate(precision),
         "jaccard": _round_rate(jaccard),
         "count_error": _round_rate(count_error),
+        "top5_overlap": _top_overlap(real_codes, replay_codes, 5),
+        "top10_overlap": _top_overlap(real_codes, replay_codes, 10),
     }
 
 

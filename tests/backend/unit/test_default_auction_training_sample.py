@@ -1,10 +1,19 @@
 import json
+from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine, inspect
 
 from backend.database import Base, engine
 from backend.database.schema_migrations import ensure_runtime_columns
-from backend.models import DefaultAuctionTrainingSample, SelectionRecord, SelectedStock
+from backend.models import (
+    DefaultAuctionTrainingSample,
+    LeaderMainT0TrainingSample,
+    SelectionRecord,
+    SelectedStock,
+    StockAuctionOpen,
+    StockFeatureSnapshot,
+)
+from backend.models.seal_rate import SealRateCache, StockDailyData
 from backend.services.model_engine.default_auction_label_builder import (
     build_t0_limit_audit,
     build_t0_limit_label,
@@ -13,8 +22,33 @@ from backend.services.model_engine.default_auction_label_builder import (
     build_t1_premium_label,
 )
 from backend.services.model_engine.default_auction_sample_builder import (
+    build_samples_from_replay_range,
     build_samples_from_selected_record,
 )
+from backend.services.tdx_local_selector import get_limit_price
+
+
+def _add_default_replay_daily_rows(db, ts_code: str, end_date: str):
+    code = ts_code.split(".")[0]
+    start = datetime.strptime(end_date, "%Y%m%d").date() - timedelta(days=100)
+    prev_close = 10.0
+    for index in range(101):
+        close = get_limit_price(code, prev_close) if index in {20, 50, 80} else prev_close
+        trade_date = (start + timedelta(days=index)).strftime("%Y%m%d")
+        db.add(
+            StockDailyData(
+                trade_date=trade_date,
+                ts_code=ts_code,
+                open=close,
+                high=close,
+                low=close,
+                close=close,
+                pre_close=prev_close,
+                up_limit=get_limit_price(code, prev_close),
+                is_adj=0,
+            )
+        )
+        prev_close = close
 
 
 def test_default_auction_training_sample_is_registered(db):
@@ -105,11 +139,149 @@ def test_build_samples_from_selected_record_excludes_news_features(db):
     assert features["lu_status"] == "换手板"
     assert features["lu_open_num"] == 2
     assert features["limit_up_suc_rate"] == 66.6
+    assert "market_limit_up_count" in features
+    assert "sector_strength" in features
+    assert "leader_strength_score" in features
+    assert "retreat_risk_score" in features
+    assert "technical_score" in features
     assert "risk_tags" not in features
     assert "has_negative_news" not in features
     assert "announcement_alpha_score" not in features
     assert "reasons" not in features
     assert "next_day_plan" not in features
+
+
+def test_build_samples_from_selected_record_merges_auction_open_amount_and_volume(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(SelectedStock).delete()
+    db.query(SelectionRecord).delete()
+    db.commit()
+    db.add(SelectionRecord(id=9006, trade_date="20260513", status="success", total_count=1))
+    db.add(
+        SelectedStock(
+            record_id=9006,
+            ts_code="000007.SZ",
+            name="真实竞价样本",
+            auction_ratio=6.2,
+            auction_turnover_rate=0.9,
+            open_change_pct=3.8,
+            pre_change_pct=9.9,
+        )
+    )
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260513",
+            ts_code="000007.SZ",
+            price=10.38,
+            vol=123456,
+            amount=1281488.88,
+            pre_close=10.0,
+            auction_ratio=6.2,
+            auction_turnover_rate=0.9,
+            source="tushare_stk_auction",
+        )
+    )
+    db.commit()
+
+    build_samples_from_selected_record(db, 9006, sample_source="real_selected")
+
+    sample = db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000007.SZ").one()
+    features = json.loads(sample.feature_json)
+    assert features["auction_amount"] == 1281488.88
+    assert features["auction_volume"] == 123456
+    assert sample.auction_source == "tushare_stk_auction"
+
+
+def test_build_samples_from_selected_record_applies_market_labels_and_daily_seal_features(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(SelectedStock).delete()
+    db.query(SelectionRecord).delete()
+    db.query(StockDailyData).filter(StockDailyData.ts_code == "000030.SZ").delete()
+    db.commit()
+    db.add(SelectionRecord(id=9010, trade_date="20260508", status="success", total_count=1))
+    db.add(
+        SelectedStock(
+            record_id=9010,
+            ts_code="000030.SZ",
+            name="真实样本",
+            auction_ratio=8.5,
+            auction_turnover_rate=1.1,
+            open_change_pct=4.0,
+            pre_change_pct=6.0,
+            limit_up_count=None,
+            touch_days=None,
+            limit_up_days=None,
+            seal_rate=None,
+            rise_10d_pct=None,
+        )
+    )
+
+    code = "000030"
+    prev_close = 10.0
+    dates = [
+        "20260416",
+        "20260417",
+        "20260420",
+        "20260421",
+        "20260424",
+        "20260427",
+        "20260428",
+        "20260429",
+        "20260430",
+        "20260506",
+        "20260507",
+        "20260508",
+    ]
+    for index, trade_date in enumerate(dates):
+        up_limit = get_limit_price(code, prev_close)
+        is_limit = index in {2, 5, 10, 11}
+        close = up_limit if is_limit else prev_close + 0.1
+        db.add(
+            StockDailyData(
+                trade_date=trade_date,
+                ts_code="000030.SZ",
+                open=prev_close,
+                high=up_limit if is_limit else close,
+                low=prev_close,
+                close=close,
+                pre_close=prev_close,
+                up_limit=up_limit,
+                is_adj=0,
+            )
+        )
+        prev_close = close
+    next_up_limit = get_limit_price(code, prev_close)
+    db.add(
+        StockDailyData(
+            trade_date="20260511",
+            ts_code="000030.SZ",
+            open=round(prev_close * 1.04, 2),
+            high=next_up_limit,
+            low=round(prev_close * 1.03, 2),
+            close=next_up_limit,
+            pre_close=prev_close,
+            up_limit=next_up_limit,
+            is_adj=0,
+        )
+    )
+    db.commit()
+
+    build_samples_from_selected_record(db, 9010, sample_source="real_selected")
+
+    sample = db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000030.SZ").one()
+    features = json.loads(sample.feature_json)
+    assert features["limit_up_count"] == 3
+    assert features["touch_days"] == 3
+    assert features["limit_up_days"] == 3
+    assert features["seal_rate"] == 100.0
+    assert features["rise_10d_pct"] is not None
+    assert sample.label_t0_limit_success == 1
+    assert sample.label_t1_premium_success == 1
+    assert sample.label_t1_continue_limit == 1
+    assert sample.t1_open_return >= 3
 
 
 def test_build_samples_from_selected_record_upserts_without_duplicates(db):
@@ -267,6 +439,658 @@ def test_build_samples_from_selected_record_writes_standard_json_for_nan_and_inf
     assert features["auction_turnover_rate"] is None
     assert features["open_change_pct"] is None
     json.dumps(features, allow_nan=False)
+
+
+def test_build_samples_from_replay_range_writes_features_and_three_labels(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockFeatureSnapshot).delete()
+    db.commit()
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000001.SZ",
+            price=10.4,
+            vol=100000,
+            amount=1040000,
+            pre_close=10.0,
+            auction_ratio=8.19,
+            auction_turnover_rate=0.8,
+            source="stock_auction_open",
+        )
+    )
+    db.add(
+        StockFeatureSnapshot(
+            trade_date="20260508",
+            ts_code="000001.SZ",
+            limit_up_count_100d=5,
+            seal_rate_100d=88,
+            rise_10d_pct=12,
+            circ_mv=120,
+            pre_change_pct=9.8,
+        )
+    )
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260509",
+            ts_code="000001.SZ",
+            price=11.1,
+            vol=120000,
+            amount=1332000,
+            pre_close=10.0,
+            auction_ratio=9.1,
+            auction_turnover_rate=1.2,
+            source="stock_auction_open",
+        )
+    )
+    db.commit()
+
+    daily_rows = {
+        ("20260508", "000001.SZ"): {
+            "open": 10.4,
+            "high": 11.0,
+            "low": 10.2,
+            "close": 11.0,
+            "pre_close": 10.0,
+        },
+        ("20260509", "000001.SZ"): {
+            "open": 11.4,
+            "high": 12.1,
+            "low": 11.2,
+            "close": 12.1,
+            "pre_close": 11.0,
+        },
+    }
+
+    result = build_samples_from_replay_range(
+        db,
+        start_date="20260508",
+        end_date="20260508",
+        daily_rows=daily_rows,
+    )
+
+    sample = db.query(DefaultAuctionTrainingSample).filter_by(
+        trade_date="20260508",
+        ts_code="000001.SZ",
+        sample_source="replay_backtest",
+    ).one()
+    features = json.loads(sample.feature_json)
+    assert result == {"created_count": 1, "updated_count": 0, "skipped_count": 0, "deleted_count": 0}
+    assert sample.strategy_name == "default"
+    assert sample.strategy_version == "default_auction_v2"
+    assert sample.replay_source == "stock_auction_open"
+    assert sample.auction_source == "stock_auction_open"
+    assert sample.auction_ratio_unit == "percent"
+    assert sample.auction_turnover_rate_basis == "free_float"
+    assert features["auction_ratio"] == 8.19
+    assert features["auction_turnover_rate"] == 0.8
+    assert features["auction_volume"] == 100000
+    assert features["auction_amount"] == 1040000
+    assert features["open_change_pct"] == 4.0
+    assert features["limit_up_count"] == 5
+    assert features["seal_rate"] == 88
+    assert features["rise_10d_pct"] == 12
+    assert features["circ_mv"] == 120
+    assert features["pre_change_pct"] == 9.8
+    assert sample.label_t0_limit_success == 1
+    assert sample.label_t1_premium_success == 1
+    assert sample.label_t1_continue_limit == 1
+    assert sample.is_t0_one_line_limit_up == 0
+    assert sample.is_t1_one_line_limit_up == 0
+    assert sample.t1_open_return > 3
+
+
+def test_build_samples_from_replay_range_loads_daily_cache_when_daily_rows_not_supplied(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockFeatureSnapshot).delete()
+    db.query(StockDailyData).filter(StockDailyData.ts_code == "000010.SZ").delete()
+    db.commit()
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000010.SZ",
+            price=10.4,
+            vol=100000,
+            amount=1040000,
+            pre_close=10.0,
+            auction_ratio=8.19,
+            auction_turnover_rate=0.8,
+            source="stock_auction_open",
+        )
+    )
+    db.add(
+        StockFeatureSnapshot(
+            trade_date="20260508",
+            ts_code="000010.SZ",
+            limit_up_count_100d=5,
+            seal_rate_100d=88,
+            rise_10d_pct=12,
+            circ_mv=120,
+            pre_change_pct=9.8,
+        )
+    )
+    db.add_all(
+        [
+            StockDailyData(
+                trade_date="20260508",
+                ts_code="000010.SZ",
+                open=10.4,
+                high=11.0,
+                low=10.2,
+                close=11.0,
+                pre_close=10.0,
+                up_limit=11.0,
+                is_adj=0,
+            ),
+            StockDailyData(
+                trade_date="20260511",
+                ts_code="000010.SZ",
+                open=11.4,
+                high=12.1,
+                low=11.2,
+                close=12.1,
+                pre_close=11.0,
+                up_limit=12.1,
+                is_adj=0,
+            ),
+        ]
+    )
+    db.commit()
+
+    build_samples_from_replay_range(db, "20260508", "20260508")
+
+    sample = db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000010.SZ").one()
+    assert sample.label_t0_limit_success == 1
+    assert sample.label_t1_premium_success == 1
+    assert sample.label_t1_continue_limit == 1
+    assert sample.t0_high_return == 10.0
+    assert sample.t1_open_return > 3
+
+
+def test_build_samples_from_replay_range_calculates_seal_features_from_daily_cache(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockFeatureSnapshot).delete()
+    db.query(StockDailyData).filter(StockDailyData.ts_code == "000020.SZ").delete()
+    db.query(SealRateCache).filter(SealRateCache.ts_code == "000020.SZ").delete()
+    db.commit()
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000020.SZ",
+            price=10.4,
+            pre_close=10.0,
+            auction_ratio=8,
+            auction_turnover_rate=1,
+            source="stock_auction_open",
+        )
+    )
+    _add_default_replay_daily_rows(db, "000020.SZ", "20260508")
+    db.commit()
+
+    build_samples_from_replay_range(db, "20260508", "20260508")
+
+    sample = db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000020.SZ").one()
+    features = json.loads(sample.feature_json)
+    assert features["limit_up_count"] == 3
+    assert features["touch_days"] == 3
+    assert features["limit_up_days"] == 3
+    assert features["seal_rate"] == 100.0
+    assert features["rise_10d_pct"] == 0.0
+
+
+def test_build_samples_from_replay_range_calculates_pre_change_from_previous_daily_close(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockFeatureSnapshot).delete()
+    db.query(StockDailyData).filter(StockDailyData.ts_code == "000021.SZ").delete()
+    db.commit()
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000021.SZ",
+            price=12.6,
+            pre_close=12.0,
+            auction_ratio=8,
+            auction_turnover_rate=1,
+            source="stock_auction_open",
+        )
+    )
+    closes = [8.0, 8.8, 9.68, 9.8, 10.78, 11.86, 11.9, 13.09, 13.2, 10.0, 12.0]
+    dates = [
+        "20260421",
+        "20260422",
+        "20260423",
+        "20260424",
+        "20260427",
+        "20260428",
+        "20260429",
+        "20260430",
+        "20260505",
+        "20260506",
+        "20260507",
+    ]
+    prev_close = 7.27
+    for trade_date, close in zip(dates, closes):
+        up_limit = get_limit_price("000021", prev_close)
+        db.add(
+            StockDailyData(
+                trade_date=trade_date,
+                ts_code="000021.SZ",
+                open=close,
+                high=up_limit if close >= up_limit - 0.01 else close,
+                low=min(prev_close, close),
+                close=close,
+                pre_close=prev_close,
+                up_limit=up_limit,
+                is_adj=0,
+            )
+        )
+        prev_close = close
+    db.commit()
+
+    build_samples_from_replay_range(db, "20260508", "20260508")
+
+    sample = db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000021.SZ").one()
+    features = json.loads(sample.feature_json)
+    assert features["pre_change_pct"] == 20.0
+
+
+def test_build_samples_from_replay_range_does_not_use_trade_day_close_for_replay_filters(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockFeatureSnapshot).delete()
+    db.query(StockDailyData).filter(StockDailyData.ts_code == "000022.SZ").delete()
+    db.commit()
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000022.SZ",
+            price=12.6,
+            pre_close=12.0,
+            auction_ratio=8,
+            auction_turnover_rate=1,
+            source="stock_auction_open",
+        )
+    )
+    closes = [8.0, 8.8, 9.68, 9.8, 10.78, 11.86, 11.9, 13.09, 13.2, 10.0, 12.0]
+    dates = [
+        "20260421",
+        "20260422",
+        "20260423",
+        "20260424",
+        "20260427",
+        "20260428",
+        "20260429",
+        "20260430",
+        "20260505",
+        "20260506",
+        "20260507",
+    ]
+    prev_close = 7.27
+    for trade_date, close in zip(dates, closes):
+        up_limit = get_limit_price("000022", prev_close)
+        db.add(
+            StockDailyData(
+                trade_date=trade_date,
+                ts_code="000022.SZ",
+                open=close,
+                high=up_limit if close >= up_limit - 0.01 else close,
+                low=min(prev_close, close),
+                close=close,
+                pre_close=prev_close,
+                up_limit=up_limit,
+                is_adj=0,
+            )
+        )
+        prev_close = close
+    db.add(
+        StockDailyData(
+            trade_date="20260508",
+            ts_code="000022.SZ",
+            open=6.0,
+            high=6.1,
+            low=5.5,
+            close=6.0,
+            pre_close=12.0,
+            up_limit=get_limit_price("000022", 12.0),
+            is_adj=0,
+        )
+    )
+    db.commit()
+
+    build_samples_from_replay_range(db, "20260508", "20260508")
+
+    sample = db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000022.SZ").one()
+    features = json.loads(sample.feature_json)
+    assert features["rise_10d_pct"] == 50.0
+
+
+def test_build_samples_from_replay_range_deletes_stale_replay_samples(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockFeatureSnapshot).delete()
+    db.query(StockDailyData).filter(StockDailyData.ts_code.in_(["000023.SZ", "000024.SZ"])).delete()
+    db.commit()
+    db.add(
+        DefaultAuctionTrainingSample(
+            strategy_version="default_auction_v2",
+            trade_date="20260508",
+            ts_code="000024.SZ",
+            sample_source="replay_backtest",
+            strategy_name="default",
+            feature_json="{}",
+        )
+    )
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000023.SZ",
+            price=12.6,
+            pre_close=12.0,
+            auction_ratio=8,
+            auction_turnover_rate=1,
+            source="stock_auction_open",
+        )
+    )
+    closes = [8.0, 8.8, 9.68, 9.8, 10.78, 11.86, 11.9, 13.09, 13.2, 10.0, 12.0]
+    dates = [
+        "20260421",
+        "20260422",
+        "20260423",
+        "20260424",
+        "20260427",
+        "20260428",
+        "20260429",
+        "20260430",
+        "20260505",
+        "20260506",
+        "20260507",
+    ]
+    prev_close = 7.27
+    for trade_date, close in zip(dates, closes):
+        up_limit = get_limit_price("000023", prev_close)
+        db.add(
+            StockDailyData(
+                trade_date=trade_date,
+                ts_code="000023.SZ",
+                open=close,
+                high=up_limit if close >= up_limit - 0.01 else close,
+                low=min(prev_close, close),
+                close=close,
+                pre_close=prev_close,
+                up_limit=up_limit,
+                is_adj=0,
+            )
+        )
+        prev_close = close
+    db.commit()
+
+    result = build_samples_from_replay_range(db, "20260508", "20260508")
+
+    assert result["deleted_count"] == 1
+    assert db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000023.SZ").count() == 1
+    assert db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000024.SZ").count() == 0
+
+
+def test_build_samples_from_replay_range_skips_code_already_backed_by_real_selection(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockDailyData).filter(StockDailyData.ts_code == "000026.SZ").delete()
+    db.commit()
+    db.add(
+        DefaultAuctionTrainingSample(
+            strategy_version="default_auction_v2",
+            trade_date="20260508",
+            ts_code="000026.SZ",
+            sample_source="real_selected",
+            strategy_name="default",
+            feature_json=json.dumps({"auction_ratio": 9.0}, ensure_ascii=False),
+        )
+    )
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000026.SZ",
+            price=12.6,
+            pre_close=12.0,
+            auction_ratio=8,
+            auction_turnover_rate=1,
+            source="stock_auction_open",
+        )
+    )
+    _add_default_replay_daily_rows(db, "000026.SZ", "20260508")
+    db.commit()
+
+    result = build_samples_from_replay_range(db, "20260508", "20260508")
+
+    rows = db.query(DefaultAuctionTrainingSample).filter_by(
+        trade_date="20260508",
+        ts_code="000026.SZ",
+    ).all()
+    assert result["created_count"] == 0
+    assert result["skipped_count"] == 1
+    assert [(row.sample_source, json.loads(row.feature_json)["auction_ratio"]) for row in rows] == [
+        ("real_selected", 9.0)
+    ]
+
+
+def test_build_samples_from_selected_record_removes_shadowed_replay_sample(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(SelectedStock).delete()
+    db.query(SelectionRecord).delete()
+    db.commit()
+    db.add(SelectionRecord(id=9011, trade_date="20260508", status="success", total_count=1))
+    db.add(
+        SelectedStock(
+            record_id=9011,
+            ts_code="000027.SZ",
+            name="真实样本",
+            auction_ratio=9.5,
+            auction_turnover_rate=1.2,
+            open_change_pct=4.8,
+        )
+    )
+    db.add(
+        DefaultAuctionTrainingSample(
+            strategy_version="default_auction_v2",
+            trade_date="20260508",
+            ts_code="000027.SZ",
+            sample_source="replay_backtest",
+            strategy_name="default",
+            feature_json=json.dumps({"auction_ratio": 7.0}, ensure_ascii=False),
+        )
+    )
+    db.commit()
+
+    result = build_samples_from_selected_record(db, 9011, sample_source="real_selected")
+
+    rows = db.query(DefaultAuctionTrainingSample).filter_by(
+        trade_date="20260508",
+        ts_code="000027.SZ",
+    ).all()
+    assert result["created_count"] == 1
+    assert result["deleted_count"] == 1
+    assert [(row.sample_source, json.loads(row.feature_json)["auction_ratio"]) for row in rows] == [
+        ("real_selected", 9.5)
+    ]
+
+
+def test_build_samples_from_replay_range_reuses_leader_t0_non_news_features(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(LeaderMainT0TrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockFeatureSnapshot).delete()
+    db.query(StockDailyData).filter(StockDailyData.ts_code == "000025.SZ").delete()
+    db.commit()
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000025.SZ",
+            price=12.6,
+            pre_close=12.0,
+            auction_ratio=8,
+            auction_turnover_rate=1,
+            source="stock_auction_open",
+        )
+    )
+    db.add(
+        LeaderMainT0TrainingSample(
+            trade_date="20260508",
+            ts_code="000025.SZ",
+            circ_mv=88.0,
+            sector_change_pct=2.5,
+            sector_limit_up_count=6,
+            rule_score=72.0,
+        )
+    )
+    closes = [8.0, 8.8, 9.68, 9.8, 10.78, 11.86, 11.9, 13.09, 13.2, 10.0, 12.0]
+    dates = [
+        "20260421",
+        "20260422",
+        "20260423",
+        "20260424",
+        "20260427",
+        "20260428",
+        "20260429",
+        "20260430",
+        "20260505",
+        "20260506",
+        "20260507",
+    ]
+    prev_close = 7.27
+    for trade_date, close in zip(dates, closes):
+        up_limit = get_limit_price("000025", prev_close)
+        db.add(
+            StockDailyData(
+                trade_date=trade_date,
+                ts_code="000025.SZ",
+                open=close,
+                high=up_limit if close >= up_limit - 0.01 else close,
+                low=min(prev_close, close),
+                close=close,
+                pre_close=prev_close,
+                up_limit=up_limit,
+                is_adj=0,
+            )
+        )
+        prev_close = close
+    db.commit()
+
+    build_samples_from_replay_range(db, "20260508", "20260508")
+
+    sample = db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000025.SZ").one()
+    features = json.loads(sample.feature_json)
+    assert features["circ_mv"] == 88.0
+    assert features["sector_change_pct"] == 2.5
+    assert features["sector_limit_up_count"] == 6
+    assert features["rule_score"] == 72.0
+
+
+def test_build_samples_from_replay_range_writes_previous_market_context(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockFeatureSnapshot).delete()
+    db.query(StockDailyData).filter(StockDailyData.trade_date.in_(["20260507", "20260508"])).delete()
+    db.commit()
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000001.SZ",
+            price=10.4,
+            pre_close=10.0,
+            auction_ratio=8.19,
+            auction_turnover_rate=0.8,
+            source="stock_auction_open",
+        )
+    )
+    db.add(
+        StockFeatureSnapshot(
+            trade_date="20260508",
+            ts_code="000001.SZ",
+            limit_up_count_100d=5,
+            seal_rate_100d=88,
+            rise_10d_pct=12,
+            circ_mv=120,
+        )
+    )
+    db.add_all(
+        [
+            StockDailyData(
+                trade_date="20260507",
+                ts_code="000001.SZ",
+                high=11.0,
+                close=11.0,
+                pre_close=10.0,
+                up_limit=11.0,
+                down_limit=9.0,
+            ),
+            StockDailyData(
+                trade_date="20260507",
+                ts_code="000002.SZ",
+                high=11.0,
+                close=10.2,
+                pre_close=10.0,
+                up_limit=11.0,
+                down_limit=9.0,
+            ),
+            StockDailyData(
+                trade_date="20260507",
+                ts_code="000003.SZ",
+                high=10.0,
+                close=9.0,
+                pre_close=10.0,
+                up_limit=11.0,
+                down_limit=9.0,
+            ),
+        ]
+    )
+    db.commit()
+
+    build_samples_from_replay_range(db, "20260508", "20260508")
+
+    sample = db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000001.SZ").one()
+    features = json.loads(sample.feature_json)
+    assert features["market_limit_up_count"] == 1
+    assert features["market_limit_down_count"] == 1
+    assert features["market_zhaban_rate"] == 50.0
+    assert features["market_max_connected_board"] == 1
+    assert features["market_emotion_score"] == -5.0
+
+
+def test_build_samples_from_replay_range_skips_replay_when_daily_structure_is_missing(db):
+    Base.metadata.create_all(bind=engine)
+    db.query(DefaultAuctionTrainingSample).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(StockFeatureSnapshot).delete()
+    db.commit()
+    db.add(
+        StockAuctionOpen(
+            trade_date="20260508",
+            ts_code="000002.SZ",
+            pre_close=10,
+            auction_ratio=8,
+            auction_turnover_rate=1,
+            source="stock_auction_open",
+        )
+    )
+    db.commit()
+
+    result = build_samples_from_replay_range(db, "20260508", "20260508", daily_rows={})
+
+    assert result == {"created_count": 0, "updated_count": 0, "skipped_count": 0, "deleted_count": 0}
+    assert db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000002.SZ").count() == 0
 
 
 def test_default_auction_label_builders_handle_basic_judgements():

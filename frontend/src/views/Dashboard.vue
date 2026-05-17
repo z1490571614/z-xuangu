@@ -22,7 +22,7 @@
         <p class="value stat-date">{{ stats.tradeDate || '--' }}</p>
       </div>
       <div class="stat-card">
-        <h3>LightGBM</h3>
+        <h3>选股模型</h3>
         <p :class="['stat-value', stats.modelEnabled ? 'ok' : 'err']">{{ stats.modelEnabled ? '已启用' : '未启用' }}</p>
       </div>
       <div class="stat-card">
@@ -54,6 +54,29 @@
       <div class="section-header">
         <h3>最新选股预览 ({{ latestDate }})</h3>
         <span class="stock-count">共 {{ latestStocks.length }} 只股票</span>
+      </div>
+
+      <div class="model-guide">
+        <div class="model-guide-item">
+          <strong>旧T0参考</strong>
+          <span>早期模型输出，仅作为历史兼容参考，不参与默认接力分。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>当日涨停</strong>
+          <span>目标一，衡量竞价后当天继续冲击涨停的概率。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>次日溢价</strong>
+          <span>目标二，衡量次日高开、冲高或收盘溢价的概率。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>次日连板</strong>
+          <span>目标三，衡量次日继续涨停或连板的概率。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>接力分</strong>
+          <span>三目标加权排序分，不是单一概率，越高越优先观察。</span>
+        </div>
       </div>
 
       <!-- 增强型表格 -->
@@ -94,8 +117,32 @@
                 </span>
               </th>
               <th @click="sortBy('t0_limit_success_prob')" class="sortable lightgbm-col">
-                LightGBM
+                旧T0参考
                 <span v-if="sortField === 't0_limit_success_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_t0_limit_prob')" class="sortable relay-prob-col">
+                当日涨停
+                <span v-if="sortField === 'default_t0_limit_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_t1_premium_prob')" class="sortable relay-prob-col">
+                次日溢价
+                <span v-if="sortField === 'default_t1_premium_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_t1_continue_prob')" class="sortable relay-prob-col">
+                次日连板
+                <span v-if="sortField === 'default_t1_continue_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_relay_score')" class="sortable relay-score-col">
+                接力分
+                <span v-if="sortField === 'default_relay_score'" class="sort-icon">
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
@@ -147,15 +194,27 @@
                 <span v-else class="muted">--</span>
               </td>
               <td class="num-cell lightgbm-prob" :title="lightGbmTitle(stock)">
-                <span class="model-label">T0</span>
+                <span class="model-label">旧</span>
                 <span>{{ fmtPct(stock.t0_limit_success_prob) }}</span>
+              </td>
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 't0')">
+                {{ fmtPct1(stock.default_t0_limit_prob) }}
+              </td>
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 'premium')">
+                {{ fmtPct1(stock.default_t1_premium_prob) }}
+              </td>
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 'continue')">
+                {{ fmtPct1(stock.default_t1_continue_prob) }}
+              </td>
+              <td class="num-cell relay-score" :title="defaultRelayTitle(stock, 'relay')">
+                {{ fmtScore(stock.default_relay_score) }}
               </td>
             </tr>
             <!-- 涨停/换手率标签行 -->
             <tr v-if="hasEnrichData(stock)" class="enrich-row">
-              <td colspan="3" class="enrich-cell"><span class="enrich-tag lu-desc">{{ stock.lu_desc || '--' }}</span></td>
-              <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
-              <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
+              <td colspan="5" class="enrich-cell"><span class="enrich-tag lu-desc">{{ stock.lu_desc || '--' }}</span></td>
+              <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
+              <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
               <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag open-num">炸板{{ stock.lu_open_num != null ? stock.lu_open_num : 0 }}次</span></td>
               <td colspan="2" class="enrich-cell"><span class="enrich-tag suc-rate">近一年封板率{{ fmtRate(stock.limit_up_suc_rate) }}</span></td>
               <td colspan="2" class="enrich-cell"><span class="enrich-tag turnover">昨日换手{{ fmtPct(stock.prev_turnover_rate) }}</span></td>
@@ -323,7 +382,18 @@ function leaderLevelClass(stock) {
 
 function lightGbmTitle(stock) {
   const version = stock.t0_limit_success_model_version || '未启用模型'
-  return `LightGBM T+0封板概率模型：${version}`
+  return `旧T0参考模型：预测历史样本下的T+0封板概率。版本：${version}`
+}
+
+function defaultRelayTitle(stock, target) {
+  const version = stock.default_relay_model_version || '未启用默认接力组合模型'
+  const titleMap = {
+    t0: '当日涨停模型：预测入选后当天继续冲击涨停的概率。',
+    premium: '次日溢价模型：预测次日高开、冲高或收盘溢价的概率。',
+    continue: '次日连板模型：预测次日继续涨停或连板的概率。',
+    relay: '竞价接力综合分：当日涨停、次日溢价、次日连板三目标加权后的排序分，不是单一概率。',
+  }
+  return `${titleMap[target] || '默认竞价接力V2：三目标综合判断。'}版本：${version}`
 }
 
 function openStrategySelector() {
@@ -386,6 +456,8 @@ function isLimitUp(stock) {
 
 function fmt(v) { return v != null ? Number(v).toFixed(2) : '--' }
 function fmtPct(v) { return v != null ? Number(v).toFixed(2) + '%' : '--' }
+function fmtPct1(v) { return v != null ? Number(v).toFixed(1) + '%' : '--' }
+function fmtScore(v) { return v != null ? Number(v).toFixed(1) : '--' }
 
 function getPctClass(v) {
   if (v == null) return ''
@@ -422,6 +494,22 @@ function getPctClass(v) {
 .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #f0f0f0; }
 .section-header h3 { margin: 0; font-size: 16px; color: #262626; font-weight: 600; }
 .stock-count { font-size: 13px; color: #999; background: #fafafa; padding: 4px 12px; border-radius: 12px; }
+.model-guide {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+.model-guide-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #f9fafb;
+  display: grid;
+  gap: 4px;
+}
+.model-guide-item strong { color: #1f2937; font-size: 13px; }
+.model-guide-item span { color: #6b7280; font-size: 12px; line-height: 1.45; }
 
 /* 表格容器 */
 .table-wrapper { overflow-x: auto; border-radius: 8px; border: 1px solid #f0f0f0; }
@@ -519,7 +607,11 @@ function getPctClass(v) {
 .score-level-tag.level-mid { background: #fff7e6; color: #fa8c16; }
 .score-level-tag.level-low { background: #fff2f0; color: #ff4d4f; }
 .lightgbm-col { min-width: 88px; }
+.relay-prob-col { min-width: 96px; }
+.relay-score-col { min-width: 76px; }
 .lightgbm-prob { color: #08979c; font-weight: 700; }
+.relay-prob { color: #1d4ed8; font-weight: 700; }
+.relay-score { color: #b45309; font-weight: 800; }
 .model-label {
   display: inline-block;
   margin-right: 4px;

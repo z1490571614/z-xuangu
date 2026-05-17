@@ -86,6 +86,29 @@
         </div>
       </div>
 
+      <div class="model-guide">
+        <div class="model-guide-item">
+          <strong>旧T0参考</strong>
+          <span>早期模型输出，仅作为历史兼容参考，不参与默认接力分。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>当日涨停</strong>
+          <span>目标一，衡量竞价后当天继续冲击涨停的概率。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>次日溢价</strong>
+          <span>目标二，衡量次日高开、冲高或收盘溢价的概率。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>次日连板</strong>
+          <span>目标三，衡量次日继续涨停或连板的概率。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>接力分</strong>
+          <span>三目标加权排序分，不是单一概率，越高越优先观察。</span>
+        </div>
+      </div>
+
       <div class="table-wrapper">
         <table class="data-table stock-table">
           <thead>
@@ -113,25 +136,25 @@
                 </span>
               </th>
               <th @click="sortBy('t0_limit_success_prob')" class="sortable lightgbm-col">
-                LightGBM
+                旧T0参考
                 <span v-if="sortField === 't0_limit_success_prob'" class="sort-icon">
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
               <th @click="sortBy('default_t0_limit_prob')" class="sortable relay-prob-col">
-                T+0涨停概率
+                当日涨停
                 <span v-if="sortField === 'default_t0_limit_prob'" class="sort-icon">
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
               <th @click="sortBy('default_t1_premium_prob')" class="sortable relay-prob-col">
-                T+1高溢价概率
+                次日溢价
                 <span v-if="sortField === 'default_t1_premium_prob'" class="sort-icon">
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
               <th @click="sortBy('default_t1_continue_prob')" class="sortable relay-prob-col">
-                T+1连板概率
+                次日连板
                 <span v-if="sortField === 'default_t1_continue_prob'" class="sort-icon">
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
@@ -181,19 +204,19 @@
                 <span v-else class="muted">{{ stock.final_score != null ? stock.final_score.toFixed(1) : '--' }}</span>
               </td>
               <td class="num-cell model-prob lightgbm-prob" :title="lightGbmTitle(stock)">
-                <span class="model-label">T0</span>
+                <span class="model-label">旧</span>
                 <span>{{ formatPct(stock.t0_limit_success_prob) }}</span>
               </td>
-              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock)">
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 't0')">
                 {{ formatPercentScore(stock.default_t0_limit_prob) }}
               </td>
-              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock)">
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 'premium')">
                 {{ formatPercentScore(stock.default_t1_premium_prob) }}
               </td>
-              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock)">
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 'continue')">
                 {{ formatPercentScore(stock.default_t1_continue_prob) }}
               </td>
-              <td class="num-cell relay-score" :title="defaultRelayTitle(stock)">
+              <td class="num-cell relay-score" :title="defaultRelayTitle(stock, 'relay')">
                 {{ formatScore(stock.default_relay_score) }}
               </td>
               <td class="num-cell">{{ stock.leader_strength_score ?? '--' }}</td>
@@ -503,12 +526,18 @@ function formatTime(t) { if (!t) return '--'; return t.replace('T', ' ').substri
 
 function lightGbmTitle(stock) {
   const version = stock.t0_limit_success_model_version || '未启用模型'
-  return `LightGBM T+0封板概率模型：${version}`
+  return `旧T0参考模型：预测历史样本下的T+0封板概率。版本：${version}`
 }
 
-function defaultRelayTitle(stock) {
+function defaultRelayTitle(stock, target) {
   const version = stock.default_relay_model_version || '未启用默认接力组合模型'
-  return `默认竞价接力 V2：${version}`
+  const titleMap = {
+    t0: '当日涨停模型：预测入选后当天继续冲击涨停的概率。',
+    premium: '次日溢价模型：预测次日高开、冲高或收盘溢价的概率。',
+    continue: '次日连板模型：预测次日继续涨停或连板的概率。',
+    relay: '竞价接力综合分：当日涨停、次日溢价、次日连板三目标加权后的排序分，不是单一概率。',
+  }
+  return `${titleMap[target] || '默认竞价接力V2：三目标综合判断。'}版本：${version}`
 }
 
 function fmtRate(v) {
@@ -621,6 +650,33 @@ function isLimitUp(stock) {
   color: #8c8c8c;
   font-size: 12px;
   line-height: 1.6;
+}
+
+.model-guide {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.model-guide-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #f9fafb;
+  display: grid;
+  gap: 4px;
+}
+
+.model-guide-item strong {
+  color: #1f2937;
+  font-size: 13px;
+}
+
+.model-guide-item span {
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .data-table { width: 100%; border-collapse: collapse; margin-top: 12px; white-space: nowrap; }

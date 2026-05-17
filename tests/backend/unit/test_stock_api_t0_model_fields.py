@@ -16,6 +16,11 @@ def test_selection_detail_returns_t0_model_fields(client, db):
             final_score=80,
             t0_limit_success_prob=72.5,
             t0_limit_success_model_version="v1",
+            default_t0_limit_prob=61.2,
+            default_t1_premium_prob=52.3,
+            default_t1_continue_prob=18.4,
+            default_relay_score=39.8,
+            default_relay_model_version="t0_v1|premium_v1|continue_v1",
         )
     )
     db.commit()
@@ -26,6 +31,11 @@ def test_selection_detail_returns_t0_model_fields(client, db):
     stock = resp.json()["data"]["stocks"][0]
     assert stock["t0_limit_success_prob"] == 72.5
     assert stock["t0_limit_success_model_version"] == "v1"
+    assert stock["default_t0_limit_prob"] == 61.2
+    assert stock["default_t1_premium_prob"] == 52.3
+    assert stock["default_t1_continue_prob"] == 18.4
+    assert stock["default_relay_score"] == 39.8
+    assert stock["default_relay_model_version"] == "t0_v1|premium_v1|continue_v1"
     disclaimer = resp.json()["data"]["t0_model_disclaimer"]
     assert "仅作排序参考" in disclaimer
     assert "不构成投资建议" in disclaimer

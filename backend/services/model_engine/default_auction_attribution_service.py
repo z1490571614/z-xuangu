@@ -32,6 +32,8 @@ REJECT_REASON_TEXT = {
     "top5_lift_below_threshold": "Top5提升不足",
     "topk_positive_count_below_threshold": "TopK正例数不足",
     "auc_below_threshold": "AUC低于验收线",
+    "probability_spread_below_threshold": "概率分布过窄",
+    "trained_tree_count_below_threshold": "有效树数量不足",
 }
 
 
@@ -58,6 +60,53 @@ def _label_value(value: Any) -> Optional[int]:
 
 def _round_rate(value: float) -> float:
     return round(float(value), 4)
+
+
+def _ratio_counts(values: List[str], total: int) -> Dict[str, float]:
+    counts: Dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return {
+        key: _round_rate(count / total) if total else 0.0
+        for key, count in counts.items()
+    }
+
+
+def _positive_negative_ratio(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    labels = [_label_value(row.get("label")) for row in rows]
+    known = [label for label in labels if label is not None]
+    positive = sum(1 for label in known if label == 1)
+    negative = sum(1 for label in known if label == 0)
+    return {
+        "positive": positive,
+        "negative": negative,
+        "positive_rate": _round_rate(positive / len(known)) if known else 0.0,
+    }
+
+
+def _coverage_by_date(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        date = row.get("trade_date")
+        if date:
+            key = str(date)
+            counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _outlier_count(feature_name: str, values: List[float]) -> int:
+    if not values:
+        return 0
+    if feature_name in {"auction_ratio", "auction_turnover_rate", "open_change_pct", "pre_change_pct"}:
+        return sum(1 for value in values if value < -50 or value > 50)
+    if feature_name in {"seal_rate", "limit_up_suc_rate"}:
+        return sum(1 for value in values if value < 0 or value > 100)
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    std = variance ** 0.5
+    if std == 0:
+        return 0
+    return sum(1 for value in values if abs(value - mean) > 4 * std)
 
 
 def _auto_feature_names(rows: List[Dict[str, Any]]) -> List[str]:
@@ -116,9 +165,11 @@ def build_feature_quality_report(
         )
         zero_count = sum(1 for number in valid_numbers if number == 0)
         unique_count = len(set(valid_numbers))
+        outlier_count = _outlier_count(feature_name, valid_numbers)
         unavailable_count = missing_count + invalid_count
         missing_rate = _round_rate(unavailable_count / total) if total else 1.0
         zero_rate = _round_rate(zero_count / len(valid_numbers)) if valid_numbers else 1.0
+        outlier_rate = _round_rate(outlier_count / len(valid_numbers)) if valid_numbers else 0.0
 
         reason = ""
         if total == 0:
@@ -145,17 +196,27 @@ def build_feature_quality_report(
             "valid_count": len(valid_numbers),
             "missing_rate": missing_rate,
             "zero_rate": zero_rate,
+            "outlier_count": outlier_count,
+            "outlier_rate": outlier_rate,
             "unique_count": unique_count,
             "min": min(valid_numbers) if valid_numbers else None,
             "max": max(valid_numbers) if valid_numbers else None,
         }
 
+    source_values = [
+        str(row.get("sample_source"))
+        for row in rows
+        if row.get("sample_source") not in (None, "")
+    ]
     return {
         "sample_count": total,
         "features": features,
         "usable_features": usable_features,
         "dropped_features": dropped_features,
         "ignored_features": ignored_features,
+        "source_mix_ratio": _ratio_counts(source_values, len(source_values)),
+        "positive_negative_ratio": _positive_negative_ratio(rows),
+        "coverage_by_date": _coverage_by_date(rows),
     }
 
 
@@ -270,4 +331,77 @@ def build_training_attribution(
         "failure_reasons": reject_reasons,
         "failure_summary": _format_failure_summary(reject_reasons),
         "next_attempt_suggestions": ["尝试更保守参数或扩大训练样本"] if reject_reasons else [],
+    }
+
+
+def _factor_text(feature_name: str, direction: str) -> str:
+    labels = {
+        "auction_ratio": "auction_ratio 位于当前模型关注区间",
+        "auction_turnover_rate": "auction_turnover_rate 对竞价承接判断影响明显",
+        "open_change_pct": "open_change_pct 反映开盘预期",
+        "seal_rate": "seal_rate 反映历史封板质量",
+        "market_max_connected_board": "market_max_connected_board 反映接力高度",
+        "health_score": "health_score 反映龙头健康度",
+        "retreat_risk_score": "retreat_risk_score 反映退潮风险",
+        "sector_strength": "sector_strength 反映板块强度",
+    }
+    base = labels.get(feature_name, f"{feature_name} 对预测有贡献")
+    if direction == "positive":
+        return f"{base}，贡献为正"
+    if direction == "negative":
+        return f"{base}，贡献为负"
+    return f"{base}，贡献中性"
+
+
+def build_single_prediction_attribution(
+    probability: Any,
+    model_version: str,
+    features: Dict[str, Any],
+    feature_contributions: Dict[str, Any],
+    bucket_report: List[Dict[str, Any]],
+    data_quality_warnings: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    contributions = {
+        str(name): _safe_float(value) or 0.0
+        for name, value in (feature_contributions or {}).items()
+    }
+    positive_factors = [
+        _factor_text(name, "positive")
+        for name, value in contributions.items()
+        if value > 0
+    ]
+    negative_factors = [
+        _factor_text(name, "negative")
+        for name, value in contributions.items()
+        if value < 0
+    ]
+    neutral_factors = [
+        _factor_text(name, "neutral")
+        for name, value in contributions.items()
+        if value == 0
+    ]
+    bucket_explanations = []
+    for item in bucket_report or []:
+        feature_name = item.get("feature_name")
+        if not feature_name or feature_name not in (features or {}):
+            continue
+        bucket_explanations.append(
+            {
+                "feature_name": feature_name,
+                "value": features.get(feature_name),
+                "bucket": item.get("bucket"),
+                "lift": item.get("lift"),
+                "conclusion": item.get("conclusion"),
+            }
+        )
+
+    return {
+        "probability": _safe_float(probability),
+        "model_version": model_version,
+        "positive_factors": positive_factors,
+        "negative_factors": negative_factors,
+        "neutral_factors": neutral_factors,
+        "feature_contributions": contributions,
+        "bucket_explanations": bucket_explanations,
+        "data_quality_warnings": data_quality_warnings or [],
     }

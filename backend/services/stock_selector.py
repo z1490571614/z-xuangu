@@ -802,6 +802,10 @@ class StockSelectorService:
 
             db.commit()
             logger.info(f"选股结果已保存，记录ID: {record.id}")
+            try:
+                _trigger_default_auction_relay_prediction_refresh(record.id)
+            except Exception as e:
+                logger.warning(f"默认竞价接力预测刷新触发失败（不影响主流程）: {e}")
             return record.id
         except Exception as e:
             db.rollback()
@@ -1035,6 +1039,33 @@ def _trigger_dc_board_preheat(stocks: List[Dict], trade_date: str):
     logger.info(f"[预热] 后台启动 {len(stocks)} 只股票的东财板块关系刷新")
     pool = ThreadPoolExecutor(max_workers=1)
     pool.submit(_warm_all)
+    pool.shutdown(wait=False)
+
+
+def _trigger_default_auction_relay_prediction_refresh(record_id: int):
+    """后台刷新默认竞价接力三目标预测，失败不影响选股保存。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from backend.services.model_engine.model_management_service import (
+        DEFAULT_AUCTION_RELAY_MODEL_NAME,
+        refresh_record_predictions,
+    )
+
+    def _refresh():
+        db = SessionLocal()
+        try:
+            result = refresh_record_predictions(db, DEFAULT_AUCTION_RELAY_MODEL_NAME, record_id)
+            logger.info(
+                f"[默认竞价接力] 预测刷新完成: record_id={record_id}, "
+                f"updated={result.get('updated_count', 0)}, failed={len(result.get('failed', []))}"
+            )
+        except Exception as e:
+            logger.warning(f"[默认竞价接力] 预测刷新失败 record_id={record_id}: {e}")
+        finally:
+            db.close()
+
+    logger.info(f"[默认竞价接力] 后台启动预测刷新: record_id={record_id}")
+    pool = ThreadPoolExecutor(max_workers=1)
+    pool.submit(_refresh)
     pool.shutdown(wait=False)
 
 

@@ -177,6 +177,40 @@ def ensure_runtime_columns(engine) -> None:
             logger.info("数据库表已补齐: model_training_job")
             existing_tables.add("model_training_job")
 
+        if "stock_minute_bar" not in existing_tables:
+            conn.execute(text("""
+                CREATE TABLE stock_minute_bar (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    ts_code VARCHAR(20) NOT NULL,
+                    trade_date VARCHAR(10) NOT NULL,
+                    trade_time VARCHAR(5) NOT NULL,
+                    bar_time VARCHAR(19) NOT NULL,
+                    interval INTEGER NOT NULL DEFAULT 1,
+                    open FLOAT,
+                    high FLOAT,
+                    low FLOAT,
+                    close FLOAT,
+                    vol FLOAT,
+                    amount FLOAT,
+                    source VARCHAR(30) NOT NULL DEFAULT 'tdx_lc1',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uk_stock_minute_bar_code_time_interval UNIQUE (
+                        ts_code,
+                        bar_time,
+                        interval
+                    )
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_stock_minute_bar_id ON stock_minute_bar (id)"))
+            conn.execute(text("CREATE INDEX ix_stock_minute_bar_ts_code ON stock_minute_bar (ts_code)"))
+            conn.execute(text("CREATE INDEX ix_stock_minute_bar_trade_date ON stock_minute_bar (trade_date)"))
+            conn.execute(text("CREATE INDEX ix_stock_minute_bar_bar_time ON stock_minute_bar (bar_time)"))
+            conn.execute(text("CREATE INDEX idx_stock_minute_bar_date_code ON stock_minute_bar (trade_date, ts_code)"))
+            conn.execute(text("CREATE INDEX idx_stock_minute_bar_code_time ON stock_minute_bar (ts_code, bar_time)"))
+            logger.info("数据库表已补齐: stock_minute_bar")
+            existing_tables.add("stock_minute_bar")
+
         for table, columns in additions.items():
             if table not in existing_tables:
                 continue

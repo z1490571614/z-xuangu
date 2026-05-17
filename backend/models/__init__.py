@@ -27,6 +27,7 @@ from backend.models.board import (
 )
 from backend.models.model_training_job import ModelTrainingJob
 from backend.models.default_auction_training_sample import DefaultAuctionTrainingSample
+from backend.models.local_market_data import StockMinuteBar
 from backend.auth.models import User
 
 __all__ = [
@@ -60,5 +61,6 @@ __all__ = [
     "DcBoardAliasSyncState",
     "ModelTrainingJob",
     "DefaultAuctionTrainingSample",
+    "StockMinuteBar",
     "User",
 ]

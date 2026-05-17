@@ -12,17 +12,23 @@
       {{ error }}
       <button class="btn-secondary" @click="loadModels">重试</button>
     </div>
-    <div v-else-if="modelNames.length === 0" class="state-panel empty">暂无可用模型</div>
+    <div v-else-if="visibleModelNames.length === 0" class="state-panel empty">暂无可用模型</div>
 
     <template v-else>
       <section class="panel">
         <h3>模型概览</h3>
+        <p class="section-help">这里只展示业务正在使用的模型。历史训练版本默认折叠，避免把每次重训尝试都铺满页面。</p>
         <div class="model-grid">
-          <div v-for="name in modelNames" :key="name" class="model-card">
-            <div class="model-title">{{ name }}</div>
+          <div v-for="name in visibleModelNames" :key="name" class="model-card">
+            <div class="model-title">{{ modelTitle(name) }}</div>
+            <p class="model-subtitle">{{ modelDescription(name) }}</p>
             <div class="metric-row">
-              <span>Active</span>
+              <span>当前启用版本</span>
               <strong>{{ activeVersionText(models[name]) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>作用</span>
+              <strong>{{ modelRole(name) }}</strong>
             </div>
             <div class="metric-row">
               <span>AUC</span>
@@ -32,21 +38,40 @@
               <span>胜率</span>
               <strong>{{ fmtPct01(models[name].active_version?.metrics?.precision) }}</strong>
             </div>
+            <div v-if="modelMetrics(name).probability_spread != null" class="metric-row">
+              <span>概率展开</span>
+              <strong>{{ fmtMetric(modelMetrics(name).probability_spread) }}</strong>
+            </div>
+            <div v-if="modelMetrics(name).trained_tree_count != null" class="metric-row">
+              <span>有效树</span>
+              <strong>{{ modelMetrics(name).trained_tree_count }}</strong>
+            </div>
             <div v-if="isCompositeModel(name)" class="version-list">
-              <span class="version-chip active composite-chip">active/composite</span>
+              <span class="version-chip active composite-chip">三目标组合模型</span>
             </div>
-            <div v-else class="version-list">
-              <button
-                v-for="version in models[name].versions"
-                :key="version.version"
-                class="version-chip"
-                :class="{ active: version.is_active, unavailable: !version.available }"
-                :disabled="activating || version.is_active || !version.available"
-                @click="activateVersion(name, version.version)"
-              >
-                {{ version.version }}{{ version.is_active ? ' active' : '' }}
-              </button>
-            </div>
+            <details v-else class="version-history">
+              <summary>历史版本 {{ models[name].versions?.length || 0 }} 个</summary>
+              <div class="version-list">
+                <button
+                  v-for="version in displayedVersions(name)"
+                  :key="version.version"
+                  class="version-chip"
+                  :class="{ active: version.is_active, unavailable: !version.available }"
+                  :disabled="activating || version.is_active || !version.available"
+                  @click="activateVersion(name, version.version)"
+                >
+                  {{ formatVersion(version.version) }}{{ version.is_active ? ' 当前' : '' }}
+                </button>
+                <button
+                  v-if="hasMoreVersions(name)"
+                  class="version-chip more"
+                  type="button"
+                  @click="toggleVersionHistory(name)"
+                >
+                  {{ expandedVersions[name] ? '收起' : `展开全部 ${models[name].versions.length} 个` }}
+                </button>
+              </div>
+            </details>
           </div>
         </div>
         <p v-if="activateStatus" class="status-line">{{ activateStatus }}</p>
@@ -59,35 +84,139 @@
             <p class="panel-subtitle">三目标模型验收、样本构建与组合训练</p>
           </div>
           <span :class="['status-badge', relayCompositeReady ? 'passed' : 'rejected']">
-            {{ relayCompositeReady ? 'active ready' : 'target incomplete' }}
+            {{ relayCompositeReady ? '已启用' : '目标未完整' }}
           </span>
         </div>
 
         <div class="relay-status-grid">
           <div v-for="target in relayTargetStatuses" :key="target.model_name" class="target-card">
-            <div class="target-name">{{ target.model_name }}</div>
+            <div class="target-name">{{ modelTitle(target.model_name) }}</div>
+            <p class="target-desc">{{ modelRole(target.model_name) }}</p>
             <div class="metric-row">
-              <span>active_version</span>
-              <strong>{{ target.active_version || '--' }}</strong>
+              <span>当前版本</span>
+              <strong :title="target.active_version || ''">{{ formatVersion(target.active_version) }}</strong>
             </div>
             <div class="metric-row">
-              <span>available</span>
+              <span>状态</span>
               <strong>{{ target.available ? '可用' : '未就绪' }}</strong>
+            </div>
+            <div v-if="modelMetrics(target.model_name).probability_spread != null" class="metric-row">
+              <span>概率展开</span>
+              <strong>{{ fmtMetric(modelMetrics(target.model_name).probability_spread) }}</strong>
+            </div>
+            <div v-if="modelMetrics(target.model_name).trained_tree_count != null" class="metric-row">
+              <span>有效树</span>
+              <strong>{{ modelMetrics(target.model_name).trained_tree_count }}</strong>
             </div>
           </div>
           <div class="target-card composite-card">
-            <div class="target-name">default_auction_relay_v2</div>
+            <div class="target-name">{{ modelTitle('default_auction_relay_v2') }}</div>
+            <p class="target-desc">{{ modelRole('default_auction_relay_v2') }}</p>
             <div class="metric-row">
-              <span>active_version</span>
-              <strong>{{ activeVersionText(relayModel) }}</strong>
+              <span>当前组合版本</span>
+              <strong :title="rawActiveVersionText(relayModel)">{{ activeVersionText(relayModel) }}</strong>
             </div>
             <div class="target-list">
-              <span v-for="target in relayCompositeTargets" :key="target">{{ target }}</span>
+              <span v-for="target in relayCompositeTargets" :key="target">{{ modelTitle(target) }}</span>
             </div>
           </div>
         </div>
 
         <div class="relay-grid">
+          <div class="relay-card wide">
+            <h4>数据管道重建</h4>
+            <div class="form-grid compact">
+              <label>
+                start
+                <input v-model="relay.startDate" />
+              </label>
+              <label>
+                end
+                <input v-model="relay.endDate" />
+              </label>
+              <label>
+                TDX vipdoc
+                <input v-model="relay.tdxVipdocPath" placeholder="默认使用后端配置" />
+              </label>
+              <label>
+                minute_interval
+                <input v-model.number="relay.minuteInterval" type="number" min="1" />
+              </label>
+              <label>
+                commit_every
+                <input v-model.number="relay.commitEvery" type="number" min="1" />
+              </label>
+              <label class="check-row">
+                <input v-model="relay.syncDaily" type="checkbox" />
+                日线
+              </label>
+              <label class="check-row">
+                <input v-model="relay.syncMinute" type="checkbox" />
+                分钟线
+              </label>
+              <label class="check-row">
+                <input v-model="relay.recalculateAuctionRatios" type="checkbox" />
+                竞昨比
+              </label>
+              <label class="check-row">
+                <input v-model="relay.buildPipelineSamples" type="checkbox" />
+                样本
+              </label>
+              <label class="check-row">
+                <input v-model="relay.runPipelineBacktest" type="checkbox" />
+                回测
+              </label>
+              <label class="check-row">
+                <input v-model="relay.runPipelineTraining" type="checkbox" />
+                训练
+              </label>
+              <button class="btn-primary" :disabled="relay.pipelineRunning" @click="rebuildRelayPipeline">
+                {{ relay.pipelineRunning ? '重建中' : '重建管道' }}
+              </button>
+            </div>
+            <div v-if="relay.pipelineRunning" class="state-box">数据管道重建中</div>
+            <div v-else-if="relay.pipelineError" class="state-box error">
+              {{ relay.pipelineError }}
+              <button class="btn-secondary small" @click="rebuildRelayPipeline">重试</button>
+            </div>
+            <div v-else-if="relay.pipelineResult" class="result-box">
+              <div class="pipeline-stage-grid">
+                <div class="pipeline-stage">
+                  <span>日线</span>
+                  <strong>{{ relay.pipelineResult.daily_sync?.rows_synced ?? '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>分钟线</span>
+                  <strong>{{ relay.pipelineResult.minute_sync?.rows_synced ?? '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>竞昨比</span>
+                  <strong>{{ relay.pipelineResult.auction_ratio_recalc?.updated_count ?? '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>回放验收</span>
+                  <strong>{{ relay.pipelineResult.replay_validation?.accepted === true ? '通过' : relay.pipelineResult.replay_validation ? '未通过' : '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>样本</span>
+                  <strong>{{ relay.pipelineResult.sample_build?.created_count ?? relay.pipelineResult.sample_build?.created ?? '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>回测</span>
+                  <strong>{{ relay.pipelineResult.backtest?.targets ? Object.keys(relay.pipelineResult.backtest.targets).length : '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>训练任务</span>
+                  <strong>{{ relay.pipelineResult.training_job?.job_id || '--' }}</strong>
+                </div>
+              </div>
+              <div v-if="relay.pipelineResult.replay_validation?.reject_reasons?.length" class="reason-list">
+                <span v-for="reason in relay.pipelineResult.replay_validation.reject_reasons" :key="reason">{{ reason }}</span>
+              </div>
+            </div>
+            <div v-else class="empty-inline">尚未重建数据管道</div>
+          </div>
+
           <div class="relay-card">
             <h4>回放验收</h4>
             <div class="form-grid compact">
@@ -200,23 +329,49 @@
 
               <div v-if="relay.diagnostics.acceptance?.targets" class="target-acceptance">
                 <div v-for="(target, name) in relay.diagnostics.acceptance.targets" :key="name" class="acceptance-row">
-                  <strong>{{ name }}</strong>
+                  <strong :title="name">{{ modelTitle(name) }}</strong>
                   <span>{{ target.accepted ? '通过' : '未通过' }}</span>
                   <span v-if="target.version">版本 {{ target.version }}</span>
+                  <span v-if="target.metrics?.probability_spread != null">概率展开 {{ fmtMetric(target.metrics.probability_spread) }}</span>
+                  <span v-if="target.metrics?.trained_tree_count != null">有效树 {{ target.metrics.trained_tree_count }}</span>
                   <span v-if="target.reject_reasons?.length">{{ target.reject_reasons.join(' / ') }}</span>
                 </div>
               </div>
 
               <div v-if="relay.diagnostics.attempts?.length" class="attempt-list">
                 <div v-for="attempt in relay.diagnostics.attempts" :key="`${attempt.target}-${attempt.attempt}-${attempt.profile}`" class="attempt-row">
-                  <strong>{{ attempt.target }}</strong>
+                  <strong :title="attempt.target">{{ modelTitle(attempt.target) }}</strong>
                   <span>第 {{ attempt.attempt }} 次</span>
                   <span>{{ attempt.accepted ? '通过' : '未通过' }}</span>
                   <span v-if="attempt.profile">{{ attempt.profile }}</span>
+                  <span v-if="attempt.metrics?.probability_spread != null">概率展开 {{ fmtMetric(attempt.metrics.probability_spread) }}</span>
+                  <span v-if="attempt.metrics?.trained_tree_count != null">有效树 {{ attempt.metrics.trained_tree_count }}</span>
                   <span v-if="attempt.reject_reasons?.length">{{ attempt.reject_reasons.join(' / ') }}</span>
                 </div>
               </div>
               <div v-else class="empty-inline">attempts 暂无明细</div>
+
+              <div v-if="relay.diagnostics.diagnostic_report" class="diagnostic-report">
+                <h4>诊断报告</h4>
+                <div v-if="Object.keys(relay.diagnostics.diagnostic_report.baseline_rates || {}).length" class="metric-grid">
+                  <div v-for="(rate, name) in relay.diagnostics.diagnostic_report.baseline_rates" :key="name" class="metric-item">
+                    <span :title="name">{{ modelTitle(name) }}</span>
+                    <strong>{{ formatRate(rate) }}</strong>
+                  </div>
+                </div>
+                <div v-else class="empty-inline">基础胜率暂无数据</div>
+                <div v-if="relay.diagnostics.diagnostic_report.auction_ratio_bucket_report?.length" class="bucket-list">
+                  <div v-for="(item, idx) in relay.diagnostics.diagnostic_report.auction_ratio_bucket_report.slice(0, 6)" :key="`ratio-${idx}`" class="bucket-row">
+                    <span :title="item.target || ''">{{ modelTitle(item.target) }}</span>
+                    <strong>竞昨比 {{ item.bucket }}</strong>
+                    <span>胜率 {{ formatRate(item.positive_rate) }}</span>
+                    <span>lift {{ formatRate(item.lift) }}</span>
+                  </div>
+                </div>
+                <div v-if="relay.diagnostics.diagnostic_report.failure_reasons?.length" class="reason-list">
+                  <span v-for="reason in relay.diagnostics.diagnostic_report.failure_reasons" :key="reason">{{ reason }}</span>
+                </div>
+              </div>
 
               <div v-if="relay.diagnostics.logs?.length" class="log-list">
                 <div v-for="(log, idx) in relay.diagnostics.logs" :key="idx">{{ log.message || log }}</div>
@@ -234,7 +389,7 @@
           <label>
             模型
             <select v-model="selectedModel">
-              <option v-for="name in modelNames" :key="name" :value="name">{{ name }}</option>
+              <option v-for="name in visibleModelNames" :key="name" :value="name">{{ modelTitle(name) }}</option>
             </select>
           </label>
           <label>
@@ -377,28 +532,87 @@ const refreshing = ref(false)
 const training = ref(false)
 const currentJob = ref(null)
 const modelNames = computed(() => Object.keys(models.value))
+const expandedVersions = ref({})
 const DEFAULT_AUCTION_RELAY_MODEL = 'default_auction_relay_v2'
 const DEFAULT_AUCTION_TARGETS = [
   'default_auction_t0_limit_lgbm',
   'default_auction_t1_premium_lgbm',
   'default_auction_t1_continue_lgbm',
 ]
+const MODEL_DISPLAY_ORDER = [
+  DEFAULT_AUCTION_RELAY_MODEL,
+  'default_auction_t0_limit_lgbm',
+  'default_auction_t1_premium_lgbm',
+  'default_auction_t1_continue_lgbm',
+  'leader_main_t0_lgbm',
+]
+const MODEL_META = {
+  default_auction_relay_v2: {
+    title: '默认竞价接力组合',
+    description: '把三个竞价接力目标加权成一个排序分，用于默认选股列表排序和辅助判断。',
+    role: '综合接力排序',
+  },
+  default_auction_t0_limit_lgbm: {
+    title: '竞价后当日涨停模型',
+    description: '判断入选股当天是否有继续冲击涨停的概率。',
+    role: '预测T+0涨停',
+  },
+  default_auction_t1_premium_lgbm: {
+    title: '次日高溢价模型',
+    description: '判断入选股次日是否容易出现高开或冲高溢价。',
+    role: '预测T+1溢价',
+  },
+  default_auction_t1_continue_lgbm: {
+    title: '次日连板模型',
+    description: '判断入选股次日是否有继续涨停或连板的概率。',
+    role: '预测T+1连板',
+  },
+  leader_main_t0_lgbm: {
+    title: '龙头T0辅助模型',
+    description: '旧版T0成功率模型，主要作为龙头战法和历史兼容参考。',
+    role: '旧T0参考',
+  },
+  active_auction_lgbm: {
+    title: '竞价旧模型',
+    description: '早期竞价模型，保留用于历史兼容。',
+    role: '历史兼容',
+  },
+}
+const visibleModelNames = computed(() => {
+  const known = MODEL_DISPLAY_ORDER.filter(name => models.value[name])
+  const rest = modelNames.value
+    .filter(name => !MODEL_DISPLAY_ORDER.includes(name))
+    .sort()
+  return [...known, ...rest]
+})
 
 const relay = ref({
   validating: false,
   building: false,
   training: false,
+  pipelineRunning: false,
   validation: null,
   buildResult: null,
   diagnostics: null,
+  pipelineResult: null,
   validationError: '',
   buildError: '',
   trainError: '',
+  pipelineError: '',
   recentDays: 5,
   recordId: '',
   sampleSource: 'real_selected',
   startDate: '20250116',
   endDate: '',
+  tdxVipdocPath: '',
+  minuteInterval: 1,
+  commitEvery: 5000,
+  syncDaily: true,
+  syncMinute: true,
+  recalculateAuctionRatios: true,
+  buildPipelineSamples: true,
+  runPipelineBacktest: false,
+  runPipelineTraining: false,
   maxRetrainAttempts: 5,
   autoActivate: false,
   jobId: null,
@@ -549,6 +763,43 @@ async function buildRelaySamples() {
   }
 }
 
+async function rebuildRelayPipeline() {
+  relay.value.pipelineRunning = true
+  relay.value.pipelineError = ''
+  relay.value.pipelineResult = null
+  try {
+    const res = await axios.post('/api/v1/models/default-auction-relay/rebuild-pipeline', {
+      start_date: relay.value.startDate,
+      end_date: relay.value.endDate,
+      tdx_vipdoc_path: relay.value.tdxVipdocPath || null,
+      commit_every: Number(relay.value.commitEvery) || 5000,
+      minute_interval: Number(relay.value.minuteInterval) || 1,
+      sync_daily: Boolean(relay.value.syncDaily),
+      sync_minute: Boolean(relay.value.syncMinute),
+      recalculate_auction_ratios: Boolean(relay.value.recalculateAuctionRatios),
+      build_samples: Boolean(relay.value.buildPipelineSamples),
+      run_backtest: Boolean(relay.value.runPipelineBacktest),
+      run_training: Boolean(relay.value.runPipelineTraining),
+      auto_activate: Boolean(relay.value.autoActivate),
+      params: {
+        max_retrain_attempts: Number(relay.value.maxRetrainAttempts) || 1,
+      },
+    })
+    relay.value.pipelineResult = res.data?.data || null
+    relay.value.validation = relay.value.pipelineResult?.replay_validation || relay.value.validation
+    relay.value.buildResult = relay.value.pipelineResult?.sample_build || relay.value.buildResult
+    if (relay.value.pipelineResult?.training_job?.job_id) {
+      relay.value.jobId = relay.value.pipelineResult.training_job.job_id
+      relay.value.diagnostics = { id: relay.value.jobId, status: 'pending', progress: 0, logs: [] }
+      await pollRelayDiagnostics()
+    }
+  } catch (e) {
+    relay.value.pipelineError = '管道重建失败：' + (e.response?.data?.detail || e.message)
+  } finally {
+    relay.value.pipelineRunning = false
+  }
+}
+
 async function startRelayTraining() {
   relay.value.training = true
   relay.value.trainError = ''
@@ -661,6 +912,51 @@ function fmtPct01(v) {
   return v == null ? '--' : `${(Number(v) * 100).toFixed(1)}%`
 }
 
+function modelTitle(name) {
+  return MODEL_META[name]?.title || name
+}
+
+function modelDescription(name) {
+  return MODEL_META[name]?.description || '未配置中文说明的模型，仅用于内部调试或历史兼容。'
+}
+
+function modelRole(name) {
+  return MODEL_META[name]?.role || '内部模型'
+}
+
+function modelMetrics(name) {
+  return models.value[name]?.active_version?.metrics || {}
+}
+
+function formatVersion(version) {
+  if (!version) return '--'
+  const text = String(version)
+  return text.length > 24 ? `${text.slice(0, 8)} ${text.slice(9, 15)}...` : text
+}
+
+function displayedVersions(name) {
+  const versions = models.value[name]?.versions || []
+  return expandedVersions.value[name] ? versions : versions.slice(0, 3)
+}
+
+function hasMoreVersions(name) {
+  return (models.value[name]?.versions || []).length > 3
+}
+
+function toggleVersionHistory(name) {
+  expandedVersions.value = {
+    ...expandedVersions.value,
+    [name]: !expandedVersions.value[name],
+  }
+}
+
+function formatRate(v) {
+  if (v === null || v === undefined || v === '') return '--'
+  const value = Number(v)
+  if (Number.isNaN(value)) return '--'
+  return Math.abs(value) <= 1 ? `${(value * 100).toFixed(1)}%` : value.toFixed(2)
+}
+
 function isCompositeModel(name) {
   return name === DEFAULT_AUCTION_RELAY_MODEL || Boolean(models.value[name]?.is_composite)
 }
@@ -668,8 +964,16 @@ function isCompositeModel(name) {
 function activeVersionText(model) {
   const active = model?.active_version
   if (!active) return '--'
+  if (model?.is_composite) return '三目标当前组合'
+  const text = typeof active === 'string' ? active : (active.version || active.status || 'active')
+  return formatVersion(text)
+}
+
+function rawActiveVersionText(model) {
+  const active = model?.active_version
+  if (!active) return ''
   if (typeof active === 'string') return active
-  return active.version || active.status || 'active'
+  return active.version || active.status || ''
 }
 </script>
 
@@ -679,22 +983,28 @@ function activeVersionText(model) {
 .page-title h2 { font-size: 24px; color: #1f2937; }
 .panel, .state-panel { background: #fff; border-radius: 8px; padding: 18px; margin-bottom: 16px; box-shadow: 0 2px 6px rgba(0,0,0,.06); }
 .panel h3 { font-size: 17px; margin-bottom: 14px; color: #1f2937; }
+.section-help { margin: -6px 0 14px; color: #6b7280; font-size: 13px; line-height: 1.6; }
 .panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
 .panel-head h3 { margin-bottom: 4px; }
 .panel-subtitle { margin: 0; color: #6b7280; font-size: 13px; }
 .model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
-.model-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; }
-.model-title { font-weight: 700; color: #0f766e; margin-bottom: 10px; }
+.model-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; background: #fff; }
+.model-title { font-weight: 700; color: #0f766e; margin-bottom: 5px; }
+.model-subtitle, .target-desc { margin: 0 0 10px; color: #6b7280; font-size: 12px; line-height: 1.5; }
 .metric-row { display: flex; justify-content: space-between; font-size: 14px; padding: 4px 0; color: #4b5563; }
+.metric-row strong { max-width: 58%; text-align: right; word-break: break-all; color: #111827; }
+.version-history { margin-top: 10px; color: #4b5563; }
+.version-history summary { cursor: pointer; font-size: 13px; }
 .version-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .version-chip { border: 1px solid #d1d5db; background: #fff; border-radius: 6px; padding: 6px 9px; cursor: pointer; font-size: 12px; }
 .version-chip.active { border-color: #0f766e; color: #0f766e; background: #ecfdf5; }
 .version-chip.unavailable { color: #9ca3af; background: #f9fafb; cursor: not-allowed; }
+.version-chip.more { color: #2563eb; background: #eff6ff; border-color: #bfdbfe; }
 .composite-chip { cursor: default; }
 .relay-panel { border: 1px solid #dbeafe; }
 .relay-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .target-card, .relay-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; background: #fff; }
-.target-name { font-weight: 700; color: #1f2937; margin-bottom: 8px; font-size: 13px; word-break: break-all; }
+.target-name { font-weight: 700; color: #1f2937; margin-bottom: 5px; font-size: 14px; word-break: break-all; }
 .target-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .target-list span { background: #f3f4f6; color: #374151; border-radius: 6px; padding: 4px 7px; font-size: 12px; }
 .relay-grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 12px; }
@@ -708,6 +1018,16 @@ function activeVersionText(model) {
 .reason-list span { background: #fff7ed; color: #c2410c; border-radius: 6px; padding: 4px 7px; font-size: 12px; }
 .daily-list, .target-acceptance { display: grid; gap: 8px; }
 .daily-row, .acceptance-row { display: flex; flex-wrap: wrap; gap: 10px; background: #f9fafb; border-radius: 6px; padding: 8px; }
+.diagnostic-report { margin-top: 12px; display: grid; gap: 10px; }
+.diagnostic-report h4 { margin: 0; font-size: 14px; color: #374151; }
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.metric-item, .bucket-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; background: #f9fafb; border-radius: 6px; padding: 8px; font-size: 12px; color: #374151; }
+.metric-item span { word-break: break-all; }
+.bucket-list { display: grid; gap: 6px; }
+.pipeline-stage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.pipeline-stage { background: #f9fafb; border-radius: 6px; padding: 10px; display: grid; gap: 4px; }
+.pipeline-stage span { font-size: 12px; color: #6b7280; }
+.pipeline-stage strong { font-size: 15px; color: #1f2937; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; align-items: end; }
 .form-grid.compact { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
 label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #4b5563; }
