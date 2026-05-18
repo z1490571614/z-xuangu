@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from backend.models import ModelTrainingJob, ModelVersion, SelectedStock, SelectionRecord
 from backend.models.auction_backtest import StockAuctionOpen
+from backend.services.auction_data_service import AuctionDataService
 from backend.services.model_engine.default_auction_sample_builder import build_selected_stock_feature_payloads
 from backend.services.model_engine import lightgbm_service
 from backend.services.model_engine.default_auction_attribution_service import (
@@ -40,6 +41,12 @@ DEFAULT_AUCTION_CRITICAL_FEATURES = {
     "market_max_connected_board",
     "market_zhaban_rate",
     "market_emotion_score",
+}
+DEFAULT_AUCTION_OPEN_FEATURES = {
+    "auction_ratio",
+    "auction_turnover_rate",
+    "auction_amount",
+    "auction_volume",
 }
 
 
@@ -78,6 +85,21 @@ def _backfill_selected_stock_auction_fields(stock: SelectedStock, features: Dict
         value = features.get(field)
         if value is not None:
             setattr(stock, field, value)
+
+
+def _needs_auction_open_sync(
+    feature_payloads: Dict[str, Dict[str, Any]],
+    ts_codes: List[str],
+    required_feature_cols: List[str],
+) -> bool:
+    required = DEFAULT_AUCTION_OPEN_FEATURES.intersection(required_feature_cols)
+    if not required:
+        return False
+    for ts_code in ts_codes:
+        features = (feature_payloads.get(ts_code) or {}).get("features") or {}
+        if any(_is_missing_feature_value(features.get(feature)) for feature in required):
+            return True
+    return False
 
 
 def _version_payload(version: ModelVersion) -> Dict[str, Any]:
@@ -363,6 +385,14 @@ def _refresh_default_auction_relay_predictions(
             for feature_col in _load_json(mv.feature_cols, [])
         }
     )
+    if record is not None and _needs_auction_open_sync(
+        feature_payloads,
+        [stock.ts_code for stock in stocks],
+        required_feature_cols,
+    ):
+        AuctionDataService().sync_auction_open(record.trade_date)
+        db.expire_all()
+        feature_payloads = build_selected_stock_feature_payloads(db, record, stocks)
 
     updated_count = 0
     failed = []

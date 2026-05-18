@@ -104,6 +104,56 @@ def test_sync_auction_open_upserts_without_duplicate_rows(db):
     assert math.isclose(rows[0].auction_turnover_rate, 1.64, abs_tol=0.01)
 
 
+def test_sync_auction_open_falls_back_to_previous_daily_basic_when_trade_date_empty(db):
+    Base.metadata.create_all(bind=engine)
+    daily_basic_dates = []
+
+    class FakeCollector:
+        def get_trading_calendar(self, year=None):
+            return {"20240509", "20240510"}
+
+        def get_stk_auction_open(self, trade_date):
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": trade_date,
+                        "price": 10.5,
+                        "vol": 819000,
+                        "amount": 8600000,
+                        "pre_close": 10.0,
+                    }
+                ]
+            )
+
+        def get_daily_data(self, trade_date=None, **kwargs):
+            assert trade_date == "20240509"
+            return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": trade_date, "vol": 100000}])
+
+        def get_daily_basic(self, trade_date=None):
+            daily_basic_dates.append(trade_date)
+            if trade_date == "20240510":
+                return pd.DataFrame()
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": trade_date,
+                        "float_share": 9870,
+                        "free_share": 5000,
+                    }
+                ]
+            )
+
+    service = AuctionDataService(collector=FakeCollector(), session_factory=lambda: db)
+
+    assert service.sync_auction_open("20240510") == 1
+
+    row = db.query(StockAuctionOpen).filter_by(trade_date="20240510", ts_code="000001.SZ").first()
+    assert daily_basic_dates == ["20240510", "20240509"]
+    assert math.isclose(row.auction_turnover_rate, 1.64, abs_tol=0.01)
+
+
 def test_sync_auction_open_uses_trade_date_year_calendar(db):
     Base.metadata.create_all(bind=engine)
     calls = []

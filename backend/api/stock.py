@@ -127,15 +127,23 @@ async def get_trading_date():
         )
 
 
-@router.post("/stock/select", response_model=None, tags=["选股"])
-async def execute_selection(
+async def _execute_selection_request(
     request: SelectRequest,
-    db: Session = Depends(get_db)
+    db: Session,
+    selection_channel: str | None = None,
 ):
-    """执行选股任务"""
+    """执行选股任务的公共入口。selection_channel 只替换阶段1数据通道。"""
     try:
         # 记录请求参数
-        logger.info(f"选股请求参数: strategy_id={request.strategy_id}, task_template={request.task_template}, min_seal_rate={request.min_seal_rate}, min_open_change_pct={request.min_open_change_pct}")
+        logger.info(
+            "选股请求参数: strategy_id=%s, task_template=%s, "
+            "min_seal_rate=%s, min_open_change_pct=%s, selection_channel=%s",
+            request.strategy_id,
+            request.task_template,
+            request.min_seal_rate,
+            request.min_open_change_pct,
+            selection_channel,
+        )
         
         # 根据 strategy_id 获取策略配置
         min_seal_rate = request.min_seal_rate
@@ -173,7 +181,8 @@ async def execute_selection(
             tdx_mcp_func=_tdx_mcp_func,
             min_seal_rate=min_seal_rate,
             period_days=request.period_days,
-            min_open_change_pct=min_open_change_pct
+            min_open_change_pct=min_open_change_pct,
+            selection_channel=selection_channel,
         )
 
         if request.notify and result.get("passed_count", 0) > 0:
@@ -187,6 +196,41 @@ async def execute_selection(
     except Exception as e:
         logger.error(f"选股执行失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"选股执行失败: {str(e)}")
+
+
+@router.post("/stock/select-local-tushare", response_model=None, tags=["选股"])
+async def execute_selection_local_tushare(
+    request: SelectRequest,
+    db: Session = Depends(get_db),
+):
+    """执行本地通达信日线 + Tushare 竞价选股任务"""
+    return await _execute_selection_request(
+        request=request,
+        db=db,
+        selection_channel="local_tushare",
+    )
+
+
+@router.post("/stock/select-db-tushare", response_model=None, tags=["选股"])
+async def execute_selection_db_tushare(
+    request: SelectRequest,
+    db: Session = Depends(get_db),
+):
+    """执行数据库日线 + 实时 Tushare 竞价选股任务"""
+    return await _execute_selection_request(
+        request=request,
+        db=db,
+        selection_channel="db_tushare",
+    )
+
+
+@router.post("/stock/select", response_model=None, tags=["选股"])
+async def execute_selection(
+    request: SelectRequest,
+    db: Session = Depends(get_db)
+):
+    """执行选股任务"""
+    return await _execute_selection_request(request=request, db=db)
 
 
 @router.get("/stock/results", response_model=None, tags=["选股"])

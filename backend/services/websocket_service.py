@@ -28,13 +28,20 @@ class ConnectionManager:
             channel: 频道名称（如：tasks、stocks等）
         """
         await websocket.accept()
+        await self.subscribe(websocket, channel)
 
+        logger.info(f"WebSocket连接已建立 | 频道: {channel} | 当前连接数: {len(self.get_connections(channel))}")
+
+    async def subscribe(self, websocket: WebSocket, channel: str = "default"):
+        """
+        将已建立的WebSocket加入频道。
+
+        注意：WebSocket只能accept一次，频道切换不能再次调用accept。
+        """
         async with self._lock:
             if channel not in self.active_connections:
                 self.active_connections[channel] = set()
             self.active_connections[channel].add(websocket)
-
-        logger.info(f"WebSocket连接已建立 | 频道: {channel} | 当前连接数: {len(self.get_connections(channel))}")
 
     def disconnect(self, websocket: WebSocket, channel: str = "default"):
         """
@@ -122,7 +129,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     new_channel = message.get("channel", "default")
                     if new_channel != current_channel:
                         manager.disconnect(websocket, current_channel)
-                        await manager.connect(websocket, new_channel)
+                        await manager.subscribe(websocket, new_channel)
                         current_channel = new_channel
                         await manager.send_personal_message({
                             "type": "subscribed",

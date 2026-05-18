@@ -60,6 +60,46 @@ class TestStockSelect:
         resp = client.post("/api/v1/stock/select", json={"period_days": 250})
         assert resp.status_code != 500, f"周期参数不应导致服务器错误: {resp.text[:200]}"
 
+    def test_select_local_tushare_forces_local_tushare_channel(self, client, monkeypatch):
+        """本地日线+Tushare接口必须显式走 local_tushare 通道"""
+        calls = []
+
+        def fake_select_stocks(**kwargs):
+            calls.append(kwargs)
+            return {
+                "trade_date": kwargs.get("trade_date") or "20260518",
+                "passed_count": 0,
+                "total_count": 0,
+                "stocks": [],
+            }
+
+        monkeypatch.setattr("backend.api.stock.select_stocks", fake_select_stocks)
+
+        resp = client.post("/api/v1/stock/select-local-tushare", json={"trade_date": "20260518"})
+
+        assert resp.status_code == 200
+        assert calls[0]["selection_channel"] == "local_tushare"
+
+    def test_select_db_tushare_forces_db_tushare_channel(self, client, monkeypatch):
+        """数据库日线+实时Tushare竞价接口必须显式走 db_tushare 通道"""
+        calls = []
+
+        def fake_select_stocks(**kwargs):
+            calls.append(kwargs)
+            return {
+                "trade_date": kwargs.get("trade_date") or "20260518",
+                "passed_count": 0,
+                "total_count": 0,
+                "stocks": [],
+            }
+
+        monkeypatch.setattr("backend.api.stock.select_stocks", fake_select_stocks)
+
+        resp = client.post("/api/v1/stock/select-db-tushare", json={"trade_date": "20260518"})
+
+        assert resp.status_code == 200
+        assert calls[0]["selection_channel"] == "db_tushare"
+
 
 class TestStockResults:
     def test_get_results_list_success(self, client):

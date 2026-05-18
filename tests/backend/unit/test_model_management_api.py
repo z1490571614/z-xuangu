@@ -355,6 +355,90 @@ def test_refresh_default_auction_relay_predictions_merges_auction_and_market_fea
         assert features["market_emotion_score"] == -5.0
 
 
+def test_refresh_default_auction_relay_predictions_syncs_missing_open_auction_cache(
+    db,
+    monkeypatch,
+    tmp_path,
+):
+    Base.metadata.create_all(bind=engine)
+    db.query(SelectedStock).delete()
+    db.query(SelectionRecord).delete()
+    db.query(StockAuctionOpen).delete()
+    db.query(ModelVersion).delete()
+    db.commit()
+
+    feature_cols = [
+        "auction_ratio",
+        "auction_turnover_rate",
+        "auction_amount",
+        "auction_volume",
+    ]
+    for model_name in [
+        "default_auction_t0_limit_lgbm",
+        "default_auction_t1_premium_lgbm",
+        "default_auction_t1_continue_lgbm",
+    ]:
+        model_path = tmp_path / f"{model_name}.pkl"
+        model_path.write_bytes(b"fake")
+        db.add(
+            ModelVersion(
+                model_name=model_name,
+                version=f"{model_name}_v1",
+                feature_cols=json.dumps(feature_cols, ensure_ascii=False),
+                model_path=str(model_path),
+                is_active=1,
+            )
+        )
+    db.add(SelectionRecord(id=49, trade_date="20260508", status="completed", total_count=1))
+    db.add(
+        SelectedStock(
+            record_id=49,
+            ts_code="000003.SZ",
+            name="待补竞价股",
+            open_change_pct=5.0,
+        )
+    )
+    db.commit()
+
+    calls = []
+
+    class FakeAuctionDataService:
+        def sync_auction_open(self, trade_date):
+            calls.append(trade_date)
+            db.add(
+                StockAuctionOpen(
+                    trade_date=trade_date,
+                    ts_code="000003.SZ",
+                    vol=123000,
+                    amount=1353000,
+                    auction_ratio=6.66,
+                    auction_turnover_rate=1.11,
+                    source="tushare_stk_auction",
+                )
+            )
+            db.commit()
+            return 1
+
+    monkeypatch.setattr(model_management_service, "AuctionDataService", FakeAuctionDataService, raising=False)
+    monkeypatch.setattr(
+        model_management_service.lightgbm_service,
+        "_predict_with_model_path",
+        lambda model_name, path, feature_cols, features, feature_units: 50.0,
+    )
+
+    result = model_management_service.refresh_record_predictions(db, "default_auction_relay_v2", 49)
+
+    stock = db.query(SelectedStock).filter_by(record_id=49, ts_code="000003.SZ").one()
+    assert calls == ["20260508"]
+    assert result["updated_count"] == 1
+    assert result["failed"] == []
+    assert float(stock.auction_ratio) == 6.66
+    assert float(stock.auction_turnover_rate) == 1.11
+    assert float(stock.default_t0_limit_prob) == 50.0
+    assert float(stock.default_t1_premium_prob) == 50.0
+    assert float(stock.default_t1_continue_prob) == 50.0
+
+
 def test_refresh_default_auction_relay_predictions_rejects_missing_critical_features(db, monkeypatch, tmp_path):
     Base.metadata.create_all(bind=engine)
     db.query(SelectedStock).delete()
@@ -406,6 +490,11 @@ def test_refresh_default_auction_relay_predictions_rejects_missing_critical_feat
     def fail_if_predicts(*args, **kwargs):
         raise AssertionError("关键特征缺失时不应该调用模型预测")
 
+    class EmptyAuctionDataService:
+        def sync_auction_open(self, trade_date):
+            return 0
+
+    monkeypatch.setattr(model_management_service, "AuctionDataService", EmptyAuctionDataService, raising=False)
     monkeypatch.setattr(model_management_service.lightgbm_service, "_predict_with_model_path", fail_if_predicts)
 
     result = model_management_service.refresh_record_predictions(db, "default_auction_relay_v2", 48)

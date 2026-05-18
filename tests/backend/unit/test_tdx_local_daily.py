@@ -100,6 +100,37 @@ def test_tdx_local_code_scan_only_keeps_common_a_shares(tmp_path):
     ]
 
 
+def test_tdx_local_selector_uses_previous_daily_basic_when_trade_date_empty():
+    class FakeCollector:
+        def __init__(self):
+            self.daily_basic_dates = []
+
+        def get_trading_calendar(self, year=None):
+            return {"20240509", "20240510"}
+
+        def get_daily_basic(self, trade_date=None):
+            self.daily_basic_dates.append(trade_date)
+            if trade_date == "20240510":
+                return pd.DataFrame()
+            return pd.DataFrame(
+                [
+                    {"ts_code": "000001.SZ", "trade_date": trade_date, "circ_mv": 1000000},
+                    {"ts_code": "000002.SZ", "trade_date": trade_date, "circ_mv": 30000000},
+                ]
+            )
+
+    collector = FakeCollector()
+    service = TdxLocalSelectorService.__new__(TdxLocalSelectorService)
+
+    circ_mv_map = service._build_circ_mv_map(
+        trade_date="20240510",
+        data_collector=collector,
+    )
+
+    assert collector.daily_basic_dates == ["20240510", "20240509"]
+    assert circ_mv_map == {"000001.SZ": 100.0, "000002.SZ": 3000.0}
+
+
 def test_get_daily_data_prefers_tdx_local_before_tushare(monkeypatch):
     class FakeLocal:
         def get_daily_data(self, **kwargs):
@@ -128,6 +159,7 @@ def test_get_daily_data_prefers_tdx_local_before_tushare(monkeypatch):
     collector = TushareDataCollector.__new__(TushareDataCollector)
     collector._last_pro = FakePro()
     collector._tdx_local_daily = FakeLocal()
+    collector._get_daily_data_from_db = lambda **kwargs: pd.DataFrame()
 
     df = collector.get_daily_data(trade_date="20240510")
 
@@ -158,6 +190,7 @@ def test_get_daily_data_falls_back_to_tushare_when_local_empty():
     collector = TushareDataCollector.__new__(TushareDataCollector)
     collector._last_pro = FakePro()
     collector._tdx_local_daily = FakeLocal()
+    collector._get_daily_data_from_db = lambda **kwargs: pd.DataFrame()
 
     df = collector.get_daily_data(trade_date="20240510")
 

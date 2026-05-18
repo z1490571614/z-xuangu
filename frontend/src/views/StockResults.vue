@@ -172,7 +172,6 @@
                 </span>
               </th>
               <th>风险</th>
-              <th>入选原因</th>
               <th>竞昨比</th>
               <th>竞价换手率</th>
               <th>触板</th>
@@ -221,10 +220,6 @@
               </td>
               <td class="num-cell">{{ stock.leader_strength_score ?? '--' }}</td>
               <td class="num-cell">{{ stock.retreat_risk_score ?? '--' }}</td>
-              <td class="reasons-cell">
-                <span v-if="stock.reasons?.length" class="reasons-text" :title="stock.reasons.join('; ')">{{ stock.reasons[0] }}{{ stock.reasons.length > 1 ? '等' : '' }}</span>
-                <span v-else class="muted">--</span>
-              </td>
               <td class="num-cell">{{ formatPct(stock.auction_ratio) }}</td>
               <td class="num-cell">{{ formatPct(stock.auction_turnover_rate) }}</td>
               <td class="num-cell">{{ stock.touch_days || '--' }}</td>
@@ -240,7 +235,7 @@
                 <td colspan="4" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
                 <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
                 <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag open-num">炸板{{ stock.lu_open_num != null ? stock.lu_open_num : 0 }}次</span></td>
-                <td colspan="4" class="enrich-cell"><span class="enrich-tag suc-rate">近一年封板率{{ fmtRate(stock.limit_up_suc_rate) }}</span></td>
+                <td colspan="3" class="enrich-cell"><span class="enrich-tag suc-rate">近一年封板率{{ fmtRate(stock.limit_up_suc_rate) }}</span></td>
                 <td colspan="2" class="enrich-cell"><span class="enrich-tag turnover">昨日换手{{ formatPct(stock.prev_turnover_rate) }}</span></td>
               </tr>
             </template>
@@ -769,9 +764,6 @@ function isLimitUp(stock) {
 .level-badge.B { background: #fffbe6; color: #faad14; }
 .level-badge.C { background: #fff2f0; color: #ff4d4f; }
 .level-badge.D { background: #f5f5f5; color: #999; }
-
-.reasons-cell { max-width: 180px; }
-.reasons-text { font-size: 11px; color: #666; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .stock-name-link { color: #667eea; font-weight: 600; text-decoration: none; cursor: pointer; }
 .stock-name-link:hover { text-decoration: underline; color: #764ba2; }
