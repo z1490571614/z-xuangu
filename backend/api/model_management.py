@@ -34,6 +34,7 @@ from backend.services.model_engine.default_auction_auto_learning_service import 
     run_auto_learning,
 )
 from backend.services.model_engine.default_auction_raw_data_sync_service import (
+    DefaultAuctionRawDataSyncService,
     get_default_auction_raw_data_sync_state,
 )
 from backend.services.model_engine.replay_validation_service import validate_replay_against_real
@@ -234,6 +235,12 @@ async def get_default_auction_raw_data_sync_state_endpoint(db: Session = Depends
         message="success",
         data=get_default_auction_raw_data_sync_state(db),
     )
+
+
+@router.post("/models/default-auction-relay/raw-data-sync", tags=["模型"])
+async def run_default_auction_raw_data_sync_endpoint():
+    result = DefaultAuctionRawDataSyncService().run_once_if_needed(trigger="manual")
+    return ApiResponse(code=200, message="训练原始数据同步完成", data=result)
 
 
 @router.post("/models/default-auction-replay/validate", tags=["模型"])

@@ -65,6 +65,31 @@ def test_default_auction_raw_data_sync_state_api(client, db):
     assert data["trigger"] == "startup"
 
 
+def test_default_auction_raw_data_sync_manual_api(client, monkeypatch):
+    from backend.api import model_management
+
+    calls = []
+
+    class FakeRawDataSyncService:
+        def run_once_if_needed(self, trigger):
+            calls.append(trigger)
+            return {
+                "trade_date": "20260520",
+                "status": "success",
+                "trigger": trigger,
+            }
+
+    monkeypatch.setattr(model_management, "DefaultAuctionRawDataSyncService", FakeRawDataSyncService)
+
+    resp = client.post("/api/v1/models/default-auction-relay/raw-data-sync")
+
+    assert resp.status_code == 200
+    assert calls == ["manual"]
+    assert resp.json()["message"] == "训练原始数据同步完成"
+    assert resp.json()["data"]["trade_date"] == "20260520"
+    assert resp.json()["data"]["trigger"] == "manual"
+
+
 def test_default_auction_auto_learning_run_api_creates_lists_gets_and_cancels(client, monkeypatch, db):
     from backend.api import model_management
 

@@ -22,12 +22,23 @@
         <p class="value stat-date">{{ stats.tradeDate || '--' }}</p>
       </div>
       <div class="stat-card">
-        <h3>训练数据同步至</h3>
+        <div class="stat-card-head">
+          <h3>训练数据同步至</h3>
+          <button
+            class="sync-refresh-btn"
+            type="button"
+            :disabled="rawDataSyncLoading || rawDataSyncRefreshing"
+            @click="refreshRawDataSync"
+            title="手动刷新训练原始数据"
+          >
+            {{ rawDataSyncRefreshing ? '刷新中' : '刷新' }}
+          </button>
+        </div>
         <p class="value stat-date">{{ formatDate(rawDataSyncState?.synced_to_date || rawDataSyncState?.trade_date) }}</p>
         <p class="stat-label">
           <span :class="['sync-status', rawDataSyncState?.status]">{{ rawDataSyncStatusText(rawDataSyncState?.status) }}</span>
           <span v-if="rawDataSyncState?.finished_at">更新 {{ formatDateTime(rawDataSyncState.finished_at) }}</span>
-          <span v-else-if="rawDataSyncLoading">加载中</span>
+          <span v-else-if="rawDataSyncLoading || rawDataSyncRefreshing">加载中</span>
           <span v-else-if="rawDataSyncError" class="sync-error">{{ rawDataSyncError }}</span>
         </p>
       </div>
@@ -260,6 +271,7 @@ const message = ref(null)
 const latestStocks = ref([])
 const rawDataSyncState = ref(null)
 const rawDataSyncLoading = ref(false)
+const rawDataSyncRefreshing = ref(false)
 const rawDataSyncError = ref('')
 const latestDate = ref('')
 const showStrategyModal = ref(false)
@@ -343,6 +355,21 @@ async function loadRawDataSyncState() {
     rawDataSyncError.value = e.response?.data?.detail || e.message || '加载失败'
   } finally {
     rawDataSyncLoading.value = false
+  }
+}
+
+async function refreshRawDataSync() {
+  if (rawDataSyncRefreshing.value) return
+  rawDataSyncRefreshing.value = true
+  rawDataSyncError.value = ''
+  try {
+    const res = await axios.post('/api/v1/models/default-auction-relay/raw-data-sync')
+    rawDataSyncState.value = res.data?.data || rawDataSyncState.value
+    await loadRawDataSyncState()
+  } catch (e) {
+    rawDataSyncError.value = e.response?.data?.detail || e.message || '刷新失败'
+  } finally {
+    rawDataSyncRefreshing.value = false
   }
 }
 
@@ -501,6 +528,8 @@ function getPctClass(v) {
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; margin: 12px 0; }
 .stat-card { background: white; padding: 18px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
 .stat-card h3 { margin: 0 0 8px; color: #666; font-size: 13px; font-weight: normal; }
+.stat-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.stat-card-head h3 { margin: 0; }
 .stat-value { margin: 0; font-size: 30px; font-weight: bold; color: #333; }
 .stat-value.ok { color: #52c41a; }
 .stat-value.err { color: #ff4d4f; }
@@ -512,6 +541,21 @@ function getPctClass(v) {
 .sync-status.failed { background: #fef2f2; color: #b91c1c; }
 .sync-status.not_synced { background: #fff7ed; color: #c2410c; }
 .sync-error { color: #b91c1c; }
+.sync-refresh-btn {
+  flex: 0 0 auto;
+  min-width: 48px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: #fff;
+  color: #555;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 24px;
+}
+.sync-refresh-btn:hover:not(:disabled) { color: #1677ff; border-color: #1677ff; }
+.sync-refresh-btn:disabled { opacity: .55; cursor: not-allowed; }
 .actions { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap; }
 .btn-primary { padding: 10px 20px; border: none; border-radius: 4px; background: #1890ff; color: white; cursor: pointer; font-size: 14px; transition: all 0.25s; }
 .btn-primary:hover:not(:disabled) { background: #096dd9; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(24,144,255,0.35); }
