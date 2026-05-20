@@ -100,6 +100,44 @@ class TestStockSelect:
         assert resp.status_code == 200
         assert calls[0]["selection_channel"] == "db_tushare"
 
+    def test_realtime_quotes_batches_current_selection_codes(self, client, monkeypatch):
+        """实时行情刷新接口应批量提交当前列表股票代码，并返回展示用价格字段"""
+        captured = []
+
+        class FakeCollector:
+            def get_realtime_quotes(self, ts_codes):
+                captured.append(ts_codes)
+                return {
+                    "000001.SZ": {
+                        "close": 10.5,
+                        "pre_close": 10.0,
+                        "open": 10.2,
+                        "server_time": "093001",
+                    },
+                    "600001.SH": {
+                        "close": 19.8,
+                        "pre_close": 20.0,
+                        "open": 20.1,
+                        "server_time": "093001",
+                    },
+                }
+
+        monkeypatch.setattr("backend.api.stock.TushareDataCollector", lambda: FakeCollector())
+
+        resp = client.post(
+            "/api/v1/stock/realtime-quotes",
+            json={"ts_codes": ["000001.SZ", "600001.SH", "000001.SZ"]},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert captured == [["000001.SZ", "600001.SH"]]
+        assert data["requested_count"] == 2
+        assert data["updated_count"] == 2
+        assert data["quotes"]["000001.SZ"]["close_price"] == 10.5
+        assert data["quotes"]["000001.SZ"]["change_pct"] == 5.0
+        assert data["quotes"]["000001.SZ"]["open_change_pct"] == 2.0
+
 
 class TestStockResults:
     def test_get_results_list_success(self, client):

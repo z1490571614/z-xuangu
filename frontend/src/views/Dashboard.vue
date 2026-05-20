@@ -109,10 +109,21 @@
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
-              <th @click="sortBy('change_pct')" class="sortable">
-                涨跌幅
-                <span v-if="sortField === 'change_pct'" class="sort-icon">
-                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+              <th @click="sortBy('change_pct')" class="sortable quote-refresh-col">
+                <span class="th-inline">
+                  <span>涨跌幅</span>
+                  <button
+                    class="quote-refresh-btn"
+                    type="button"
+                    :disabled="realtimeRefreshing || latestStocks.length === 0"
+                    title="刷新当前选股列表实时股价"
+                    @click.stop="refreshRealtimeQuotes"
+                  >
+                    {{ realtimeRefreshing ? '刷新中' : '刷新' }}
+                  </button>
+                  <span v-if="sortField === 'change_pct'" class="sort-icon">
+                    {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                  </span>
                 </span>
               </th>
               <th>昨涨幅</th>
@@ -269,6 +280,7 @@ const loaded = ref(false)
 const selecting = ref(false)
 const message = ref(null)
 const latestStocks = ref([])
+const realtimeRefreshing = ref(false)
 const rawDataSyncState = ref(null)
 const rawDataSyncLoading = ref(false)
 const rawDataSyncRefreshing = ref(false)
@@ -370,6 +382,51 @@ async function refreshRawDataSync() {
     rawDataSyncError.value = e.response?.data?.detail || e.message || '刷新失败'
   } finally {
     rawDataSyncRefreshing.value = false
+  }
+}
+
+async function refreshRealtimeQuotes() {
+  if (realtimeRefreshing.value || latestStocks.value.length === 0) return
+
+  const tsCodes = latestStocks.value
+    .map(stock => stock.ts_code)
+    .filter(Boolean)
+
+  if (tsCodes.length === 0) {
+    message.value = { type: 'warning', text: '当前选股列表没有可刷新的股票代码' }
+    return
+  }
+
+  realtimeRefreshing.value = true
+  try {
+    const res = await axios.post('/api/v1/stock/realtime-quotes', { ts_codes: tsCodes })
+    const quotes = res.data?.data?.quotes || {}
+    let updated = 0
+
+    latestStocks.value = latestStocks.value.map(stock => {
+      const quote = quotes[stock.ts_code]
+      if (!quote) return stock
+
+      updated += 1
+      const next = { ...stock }
+      if (quote.close_price != null) {
+        next.close_price = quote.close_price
+        next.close = quote.close_price
+      }
+      if (quote.change_pct != null) next.change_pct = quote.change_pct
+      if (quote.open_change_pct != null) next.open_change_pct = quote.open_change_pct
+      return next
+    })
+
+    message.value = {
+      type: updated > 0 ? 'success' : 'warning',
+      text: updated > 0 ? `已刷新 ${updated} 只股票实时股价` : '实时行情接口未返回当前列表数据'
+    }
+  } catch (e) {
+    const errorMsg = e.response?.data?.detail || e.message || '刷新失败'
+    message.value = { type: 'error', text: '实时股价刷新失败：' + errorMsg }
+  } finally {
+    realtimeRefreshing.value = false
   }
 }
 
@@ -633,6 +690,32 @@ function getPctClass(v) {
   margin-left: 4px;
   font-weight: bold;
   font-size: 14px;
+}
+.quote-refresh-col { min-width: 92px; }
+.th-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.quote-refresh-btn {
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.quote-refresh-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.26);
+  border-color: #ffffff;
+}
+.quote-refresh-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 /* 单元格样式 */

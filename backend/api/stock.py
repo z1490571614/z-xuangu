@@ -2,6 +2,7 @@
 选股 API 路由
 """
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
@@ -12,6 +13,7 @@ from backend.schemas import (
     SelectRequest,
 )
 from backend.services.stock_selector import select_stocks
+from backend.services.data_collector import TushareDataCollector
 from backend.models import SelectionRecord, SelectedStock
 from backend.models.stock_risk import DragonLeaderScore
 from backend.utils.trading_date import get_latest_trading_day
@@ -27,6 +29,46 @@ _tdx_mcp_func = None
 
 def _float_or_none(value):
     return float(value) if value is not None else None
+
+
+class RealtimeQuotesRequest(BaseModel):
+    ts_codes: List[str] = Field(default_factory=list, description="当前选股列表股票代码")
+
+
+def _dedupe_ts_codes(ts_codes: List[str]) -> List[str]:
+    seen = set()
+    result = []
+    for code in ts_codes:
+        normalized = str(code or "").strip().upper()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _build_realtime_quote_payload(quotes: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    payload = {}
+    for ts_code, quote in quotes.items():
+        close = quote.get("close")
+        pre_close = quote.get("pre_close")
+        open_price = quote.get("open")
+        change_pct = None
+        open_change_pct = None
+        if close is not None and pre_close is not None and pre_close > 0:
+            change_pct = round((close - pre_close) / pre_close * 100, 2)
+        if open_price is not None and pre_close is not None and pre_close > 0:
+            open_change_pct = round((open_price - pre_close) / pre_close * 100, 2)
+        payload[ts_code] = {
+            "close": close,
+            "close_price": close,
+            "pre_close": pre_close,
+            "open": open_price,
+            "change_pct": change_pct,
+            "open_change_pct": open_change_pct,
+            "server_time": quote.get("server_time"),
+        }
+    return payload
 
 
 def set_tdx_mcp_func(func):
@@ -229,6 +271,29 @@ async def execute_selection(
 ):
     """执行选股任务"""
     return await _execute_selection_request(request=request, db=db)
+
+
+@router.post("/stock/realtime-quotes", response_model=None, tags=["选股"])
+async def get_realtime_quotes_for_selection(request: RealtimeQuotesRequest):
+    """批量刷新当前选股列表的实时行情展示字段。"""
+    ts_codes = _dedupe_ts_codes(request.ts_codes)
+    if not ts_codes:
+        raise HTTPException(status_code=422, detail="请提供要刷新的股票代码")
+    try:
+        quotes = TushareDataCollector().get_realtime_quotes(ts_codes)
+        payload = _build_realtime_quote_payload(quotes)
+        return ApiResponse(
+            code=200,
+            message="实时行情刷新完成",
+            data={
+                "requested_count": len(ts_codes),
+                "updated_count": len(payload),
+                "quotes": payload,
+            },
+        )
+    except Exception as e:
+        logger.error(f"批量刷新实时行情失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"实时行情刷新失败: {e}")
 
 
 @router.get("/stock/results", response_model=None, tags=["选股"])
