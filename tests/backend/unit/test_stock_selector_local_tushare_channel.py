@@ -1,3 +1,5 @@
+import pandas as pd
+
 from backend.services.stock_selector import StockSelectorService
 
 
@@ -143,3 +145,61 @@ def test_phase3_reuses_db_tushare_precomputed_seal_rates(monkeypatch):
     assert phase.success is True
     assert phase.source == "stock_daily_data"
     assert phase.data["seal_rates"]["000001.SZ"]["seal_rate"] == 100.0
+
+
+def test_phase2_daily_basic_falls_back_to_previous_trade_date():
+    service = object.__new__(StockSelectorService)
+
+    class FakePro:
+        def daily(self, **kwargs):
+            return pd.DataFrame()
+
+    class FakeCollector:
+        def __init__(self):
+            self.daily_basic_calls = []
+
+        def get_daily_basic(self, trade_date=None):
+            self.daily_basic_calls.append(trade_date)
+            if trade_date == "20260520":
+                return pd.DataFrame()
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "pe": 12.3,
+                        "pe_ttm": 13.4,
+                        "pb": 1.5,
+                        "turnover_rate": 2.6,
+                        "volume_ratio": 1.2,
+                        "total_mv": 100000,
+                        "circ_mv": 80000,
+                    }
+                ]
+            )
+
+        def get_stock_basic(self):
+            return pd.DataFrame()
+
+        def get_trading_calendar(self):
+            return {"20260519", "20260520"}
+
+        def get_realtime_quotes(self, ts_codes):
+            return {}
+
+        def _get_pro(self):
+            return FakePro()
+
+    collector = FakeCollector()
+    service.collector = collector
+    phase1_data = {
+        "stocks": [
+            type("Stock", (), {"ts_code": "000001.SZ"})(),
+        ]
+    }
+
+    phase = service._execute_phase2(phase1_data, "20260520")
+
+    assert phase.success is True
+    assert collector.daily_basic_calls[:2] == ["20260520", "20260519"]
+    assert phase.data["analysis"]["000001.SZ"]["pe"] == 12.3
+    assert phase.data["analysis"]["000001.SZ"]["circ_mv"] == 80000

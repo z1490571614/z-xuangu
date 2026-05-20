@@ -22,6 +22,7 @@ except Exception:
     class McpTemporaryUnavailable(RuntimeError):
         pass
 from backend.services.data_collector import TushareDataCollector
+from backend.services.daily_basic_fallback import get_daily_basic_with_previous_fallback
 from backend.services.default_db_tushare_selector import DefaultDbTushareSelectorService
 from backend.services.default_local_tushare_selector import DefaultLocalTushareSelectorService
 from backend.services.seal_rate_calculator import SealRateCalculator
@@ -316,8 +317,12 @@ class StockSelectorService:
 
             # 获取每日指标
             try:
-                daily_basic = self.collector.get_daily_basic(
-                    trade_date=trade_date
+                calendar_set = self.collector.get_trading_calendar()
+                daily_basic = get_daily_basic_with_previous_fallback(
+                    self.collector,
+                    trade_date,
+                    calendar=calendar_set,
+                    purpose="阶段2补充分析",
                 )
                 # 过滤出需要的股票
                 if not daily_basic.empty:
