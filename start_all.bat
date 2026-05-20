@@ -16,7 +16,8 @@ timeout /t 2 /nobreak >nul
 
 echo [1/2] Starting backend...
 start "xuangu-backend" cmd /k "call conda activate xuangu && python -m uvicorn backend.main:app --host 127.0.0.1 --port 9999 --workers 1"
-timeout /t 5 /nobreak >nul
+echo   Waiting for backend health check...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).AddSeconds(60); do { try { $r=Invoke-WebRequest 'http://127.0.0.1:9999/api/v1/health' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { Write-Host '  Backend health OK'; exit 0 } } catch {}; Start-Sleep -Seconds 1 } while ((Get-Date) -lt $deadline); Write-Host '  [WARN] Backend health check timed out; starting frontend anyway'; exit 0"
 
 echo [2/2] Starting frontend...
 set NPM_CMD=

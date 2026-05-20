@@ -22,7 +22,17 @@
         <p class="value stat-date">{{ stats.tradeDate || '--' }}</p>
       </div>
       <div class="stat-card">
-        <h3>LightGBM</h3>
+        <h3>训练数据同步至</h3>
+        <p class="value stat-date">{{ formatDate(rawDataSyncState?.synced_to_date || rawDataSyncState?.trade_date) }}</p>
+        <p class="stat-label">
+          <span :class="['sync-status', rawDataSyncState?.status]">{{ rawDataSyncStatusText(rawDataSyncState?.status) }}</span>
+          <span v-if="rawDataSyncState?.finished_at">更新 {{ formatDateTime(rawDataSyncState.finished_at) }}</span>
+          <span v-else-if="rawDataSyncLoading">加载中</span>
+          <span v-else-if="rawDataSyncError" class="sync-error">{{ rawDataSyncError }}</span>
+        </p>
+      </div>
+      <div class="stat-card">
+        <h3>选股模型</h3>
         <p :class="['stat-value', stats.modelEnabled ? 'ok' : 'err']">{{ stats.modelEnabled ? '已启用' : '未启用' }}</p>
       </div>
       <div class="stat-card">
@@ -54,6 +64,25 @@
       <div class="section-header">
         <h3>最新选股预览 ({{ latestDate }})</h3>
         <span class="stock-count">共 {{ latestStocks.length }} 只股票</span>
+      </div>
+
+      <div class="model-guide">
+        <div class="model-guide-item">
+          <strong>当日涨停</strong>
+          <span>目标一，衡量竞价后当天继续冲击涨停的概率。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>次日溢价</strong>
+          <span>目标二，衡量次日高开、冲高或收盘溢价的概率。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>次日连板</strong>
+          <span>目标三，衡量次日继续涨停或连板的概率。</span>
+        </div>
+        <div class="model-guide-item">
+          <strong>接力分</strong>
+          <span>三目标加权排序分，不是单一概率，越高越优先观察。</span>
+        </div>
       </div>
 
       <!-- 增强型表格 -->
@@ -93,9 +122,27 @@
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
-              <th @click="sortBy('t0_limit_success_prob')" class="sortable lightgbm-col">
-                LightGBM
-                <span v-if="sortField === 't0_limit_success_prob'" class="sort-icon">
+              <th @click="sortBy('default_t0_limit_prob')" class="sortable relay-prob-col">
+                当日涨停
+                <span v-if="sortField === 'default_t0_limit_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_t1_premium_prob')" class="sortable relay-prob-col">
+                次日溢价
+                <span v-if="sortField === 'default_t1_premium_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_t1_continue_prob')" class="sortable relay-prob-col">
+                次日连板
+                <span v-if="sortField === 'default_t1_continue_prob'" class="sort-icon">
+                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="sortBy('default_relay_score')" class="sortable relay-score-col">
+                接力分
+                <span v-if="sortField === 'default_relay_score'" class="sort-icon">
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
@@ -146,16 +193,24 @@
                 </span>
                 <span v-else class="muted">--</span>
               </td>
-              <td class="num-cell lightgbm-prob" :title="lightGbmTitle(stock)">
-                <span class="model-label">T0</span>
-                <span>{{ fmtPct(stock.t0_limit_success_prob) }}</span>
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 't0')">
+                {{ fmtPct1(stock.default_t0_limit_prob) }}
+              </td>
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 'premium')">
+                {{ fmtPct1(stock.default_t1_premium_prob) }}
+              </td>
+              <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 'continue')">
+                {{ fmtPct1(stock.default_t1_continue_prob) }}
+              </td>
+              <td class="num-cell relay-score" :title="defaultRelayTitle(stock, 'relay')">
+                {{ fmtScore(stock.default_relay_score) }}
               </td>
             </tr>
             <!-- 涨停/换手率标签行 -->
             <tr v-if="hasEnrichData(stock)" class="enrich-row">
-              <td colspan="3" class="enrich-cell"><span class="enrich-tag lu-desc">{{ stock.lu_desc || '--' }}</span></td>
-              <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
-              <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
+              <td colspan="5" class="enrich-cell"><span class="enrich-tag lu-desc">{{ stock.lu_desc || '--' }}</span></td>
+              <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-tag">{{ stock.lu_tag || '--' }}</span></td>
+              <td colspan="3" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag lu-status">{{ stock.lu_status || '--' }}</span></td>
               <td colspan="2" class="enrich-cell"><span v-if="isLimitUp(stock)" class="enrich-tag open-num">炸板{{ stock.lu_open_num != null ? stock.lu_open_num : 0 }}次</span></td>
               <td colspan="2" class="enrich-cell"><span class="enrich-tag suc-rate">近一年封板率{{ fmtRate(stock.limit_up_suc_rate) }}</span></td>
               <td colspan="2" class="enrich-cell"><span class="enrich-tag turnover">昨日换手{{ fmtPct(stock.prev_turnover_rate) }}</span></td>
@@ -203,6 +258,9 @@ const loaded = ref(false)
 const selecting = ref(false)
 const message = ref(null)
 const latestStocks = ref([])
+const rawDataSyncState = ref(null)
+const rawDataSyncLoading = ref(false)
+const rawDataSyncError = ref('')
 const latestDate = ref('')
 const showStrategyModal = ref(false)
 const sortField = ref('health_score')
@@ -231,7 +289,7 @@ const sortedStocks = computed(() => {
   return sorted
 })
 
-onMounted(async () => { await loadStats(); await loadLatest() })
+onMounted(async () => { await loadStats(); await Promise.all([loadLatest(), loadRawDataSyncState()]) })
 
 async function loadStats() {
   try {
@@ -273,6 +331,19 @@ async function loadLatest() {
       stats.value.modelEnabled = false
     }
   } catch (e) { console.error('加载最新失败:', e) }
+}
+
+async function loadRawDataSyncState() {
+  rawDataSyncLoading.value = true
+  rawDataSyncError.value = ''
+  try {
+    const res = await axios.get('/api/v1/models/default-auction-relay/raw-data-sync-state')
+    rawDataSyncState.value = res.data?.data || null
+  } catch (e) {
+    rawDataSyncError.value = e.response?.data?.detail || e.message || '加载失败'
+  } finally {
+    rawDataSyncLoading.value = false
+  }
 }
 
 function sortBy(field) {
@@ -321,9 +392,15 @@ function leaderLevelClass(stock) {
   return 'level-low'
 }
 
-function lightGbmTitle(stock) {
-  const version = stock.t0_limit_success_model_version || '未启用模型'
-  return `LightGBM T+0封板概率模型：${version}`
+function defaultRelayTitle(stock, target) {
+  const version = stock.default_relay_model_version || '未启用默认接力组合模型'
+  const titleMap = {
+    t0: '当日涨停模型：预测入选后当天继续冲击涨停的概率。',
+    premium: '次日溢价模型：预测次日高开、冲高或收盘溢价的概率。',
+    continue: '次日连板模型：预测次日继续涨停或连板的概率。',
+    relay: '竞价接力综合分：当日涨停、次日溢价、次日连板三目标加权后的排序分，不是单一概率。',
+  }
+  return `${titleMap[target] || '默认竞价接力V2：三目标综合判断。'}版本：${version}`
 }
 
 function openStrategySelector() {
@@ -386,6 +463,30 @@ function isLimitUp(stock) {
 
 function fmt(v) { return v != null ? Number(v).toFixed(2) : '--' }
 function fmtPct(v) { return v != null ? Number(v).toFixed(2) + '%' : '--' }
+function fmtPct1(v) { return v != null ? Number(v).toFixed(1) + '%' : '--' }
+function fmtScore(v) { return v != null ? Number(v).toFixed(1) : '--' }
+
+function formatDate(value) {
+  if (!value) return '--'
+  const text = String(value)
+  if (text.length === 8) return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`
+  return text
+}
+
+function formatDateTime(value) {
+  if (!value) return '--'
+  const text = String(value).replace('T', ' ')
+  return text.slice(0, 19)
+}
+
+function rawDataSyncStatusText(status) {
+  return {
+    success: '成功',
+    running: '同步中',
+    failed: '失败',
+    not_synced: '未同步',
+  }[status] || '未知'
+}
 
 function getPctClass(v) {
   if (v == null) return ''
@@ -405,6 +506,12 @@ function getPctClass(v) {
 .stat-value.err { color: #ff4d4f; }
 .stat-label { margin: 4px 0 0; color: #999; font-size: 12px; }
 .stat-date { font-size: 22px !important; }
+.sync-status { display: inline-block; margin-right: 6px; border-radius: 999px; padding: 2px 8px; background: #f3f4f6; color: #4b5563; font-size: 12px; }
+.sync-status.success { background: #ecfdf5; color: #047857; }
+.sync-status.running { background: #e6f4ff; color: #1677ff; }
+.sync-status.failed { background: #fef2f2; color: #b91c1c; }
+.sync-status.not_synced { background: #fff7ed; color: #c2410c; }
+.sync-error { color: #b91c1c; }
 .actions { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap; }
 .btn-primary { padding: 10px 20px; border: none; border-radius: 4px; background: #1890ff; color: white; cursor: pointer; font-size: 14px; transition: all 0.25s; }
 .btn-primary:hover:not(:disabled) { background: #096dd9; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(24,144,255,0.35); }
@@ -422,6 +529,22 @@ function getPctClass(v) {
 .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #f0f0f0; }
 .section-header h3 { margin: 0; font-size: 16px; color: #262626; font-weight: 600; }
 .stock-count { font-size: 13px; color: #999; background: #fafafa; padding: 4px 12px; border-radius: 12px; }
+.model-guide {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+.model-guide-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #f9fafb;
+  display: grid;
+  gap: 4px;
+}
+.model-guide-item strong { color: #1f2937; font-size: 13px; }
+.model-guide-item span { color: #6b7280; font-size: 12px; line-height: 1.45; }
 
 /* 表格容器 */
 .table-wrapper { overflow-x: auto; border-radius: 8px; border: 1px solid #f0f0f0; }
@@ -518,8 +641,10 @@ function getPctClass(v) {
 .score-level-tag.level-high { background: #f6ffed; color: #52c41a; }
 .score-level-tag.level-mid { background: #fff7e6; color: #fa8c16; }
 .score-level-tag.level-low { background: #fff2f0; color: #ff4d4f; }
-.lightgbm-col { min-width: 88px; }
-.lightgbm-prob { color: #08979c; font-weight: 700; }
+.relay-prob-col { min-width: 96px; }
+.relay-score-col { min-width: 76px; }
+.relay-prob { color: #1d4ed8; font-weight: 700; }
+.relay-score { color: #b45309; font-weight: 800; }
 .model-label {
   display: inline-block;
   margin-right: 4px;

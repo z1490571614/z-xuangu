@@ -21,10 +21,12 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
-T0_MODEL_DISCLAIMER = "T+0成功率由历史样本模型估算，仅作排序参考，不构成投资建议；模型不可用时显示为空且不影响最终评分。"
-
 # 注入的 MCP 函数
 _tdx_mcp_func = None
+
+
+def _float_or_none(value):
+    return float(value) if value is not None else None
 
 
 def set_tdx_mcp_func(func):
@@ -123,15 +125,23 @@ async def get_trading_date():
         )
 
 
-@router.post("/stock/select", response_model=None, tags=["选股"])
-async def execute_selection(
+async def _execute_selection_request(
     request: SelectRequest,
-    db: Session = Depends(get_db)
+    db: Session,
+    selection_channel: str | None = None,
 ):
-    """执行选股任务"""
+    """执行选股任务的公共入口。selection_channel 只替换阶段1数据通道。"""
     try:
         # 记录请求参数
-        logger.info(f"选股请求参数: strategy_id={request.strategy_id}, task_template={request.task_template}, min_seal_rate={request.min_seal_rate}, min_open_change_pct={request.min_open_change_pct}")
+        logger.info(
+            "选股请求参数: strategy_id=%s, task_template=%s, "
+            "min_seal_rate=%s, min_open_change_pct=%s, selection_channel=%s",
+            request.strategy_id,
+            request.task_template,
+            request.min_seal_rate,
+            request.min_open_change_pct,
+            selection_channel,
+        )
         
         # 根据 strategy_id 获取策略配置
         min_seal_rate = request.min_seal_rate
@@ -169,7 +179,8 @@ async def execute_selection(
             tdx_mcp_func=_tdx_mcp_func,
             min_seal_rate=min_seal_rate,
             period_days=request.period_days,
-            min_open_change_pct=min_open_change_pct
+            min_open_change_pct=min_open_change_pct,
+            selection_channel=selection_channel,
         )
 
         if request.notify and result.get("passed_count", 0) > 0:
@@ -183,6 +194,41 @@ async def execute_selection(
     except Exception as e:
         logger.error(f"选股执行失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"选股执行失败: {str(e)}")
+
+
+@router.post("/stock/select-local-tushare", response_model=None, tags=["选股"])
+async def execute_selection_local_tushare(
+    request: SelectRequest,
+    db: Session = Depends(get_db),
+):
+    """执行本地通达信日线 + Tushare 竞价选股任务"""
+    return await _execute_selection_request(
+        request=request,
+        db=db,
+        selection_channel="local_tushare",
+    )
+
+
+@router.post("/stock/select-db-tushare", response_model=None, tags=["选股"])
+async def execute_selection_db_tushare(
+    request: SelectRequest,
+    db: Session = Depends(get_db),
+):
+    """执行数据库日线 + 实时 Tushare 竞价选股任务"""
+    return await _execute_selection_request(
+        request=request,
+        db=db,
+        selection_channel="db_tushare",
+    )
+
+
+@router.post("/stock/select", response_model=None, tags=["选股"])
+async def execute_selection(
+    request: SelectRequest,
+    db: Session = Depends(get_db)
+):
+    """执行选股任务"""
+    return await _execute_selection_request(request=request, db=db)
 
 
 @router.get("/stock/results", response_model=None, tags=["选股"])
@@ -268,11 +314,14 @@ async def get_selection_detail(
                 "industry": stock.industry or fallback.get("industry"),
                 "concept": stock.concept or fallback.get("concept"),
                 "board_type": stock.board_type or fallback.get("board_type"),
-                "rule_score": float(stock.rule_score) if stock.rule_score else None,
-                "model_score": float(stock.model_score) if stock.model_score else None,
-                "t0_limit_success_prob": float(stock.t0_limit_success_prob) if stock.t0_limit_success_prob else None,
-                "t0_limit_success_model_version": stock.t0_limit_success_model_version,
-                "final_score": float(stock.final_score) if stock.final_score else None,
+                "rule_score": _float_or_none(stock.rule_score),
+                "model_score": _float_or_none(stock.model_score),
+                "default_t0_limit_prob": _float_or_none(stock.default_t0_limit_prob),
+                "default_t1_premium_prob": _float_or_none(stock.default_t1_premium_prob),
+                "default_t1_continue_prob": _float_or_none(stock.default_t1_continue_prob),
+                "default_relay_score": _float_or_none(stock.default_relay_score),
+                "default_relay_model_version": stock.default_relay_model_version,
+                "final_score": _float_or_none(stock.final_score),
                 "score_level": stock.score_level,
                 "reasons": stock.reasons.split("; ") if stock.reasons else [],
                 "risk_tags": _json.loads(stock.risk_tags) if stock.risk_tags else [],
@@ -288,10 +337,10 @@ async def get_selection_detail(
                 "lu_tag": stock.lu_tag or fallback.get("lu_tag"),
                 "lu_status": stock.lu_status or fallback.get("lu_status"),
                 "lu_open_num": stock.lu_open_num if stock.lu_open_num is not None else fallback.get("lu_open_num"),
-                "limit_up_suc_rate": float(stock.limit_up_suc_rate) if stock.limit_up_suc_rate else fallback.get("limit_up_suc_rate"),
+                "limit_up_suc_rate": _float_or_none(stock.limit_up_suc_rate) if stock.limit_up_suc_rate is not None else fallback.get("limit_up_suc_rate"),
                 "latest_lu_date": stock.latest_lu_date or fallback.get("latest_lu_date"),
                 # 上一日换手率
-                "prev_turnover_rate": float(stock.prev_turnover_rate) if stock.prev_turnover_rate else None,
+                "prev_turnover_rate": _float_or_none(stock.prev_turnover_rate),
             })
 
         result = {
@@ -302,7 +351,6 @@ async def get_selection_detail(
             "status": record.status,
             "execution_time": record.execution_time,
             "notification_sent": record.notification_sent,
-            "t0_model_disclaimer": T0_MODEL_DISCLAIMER,
             "stocks": stock_list
         }
 

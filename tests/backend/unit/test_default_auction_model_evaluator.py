@@ -161,6 +161,32 @@ def test_judge_target_acceptance_checks_positive_count_and_auc():
     assert "auc_below_threshold" in result["reject_reasons"]
 
 
+def test_judge_target_acceptance_rejects_compressed_probability_even_when_topk_passes():
+    metrics = {
+        "baseline_rate": 0.5,
+        "top3_lift": 0.16,
+        "top5_lift": 0.12,
+        "topk_positive_count": 40,
+        "auc": 0.62,
+        "probability_spread": 1.62,
+        "trained_tree_count": 1,
+    }
+    gate = AcceptanceGate(
+        top3_lift=0.10,
+        top5_lift=0.06,
+        min_topk_positive_count=25,
+        min_auc=0.55,
+        min_probability_spread=5.0,
+        min_trained_tree_count=5,
+    )
+
+    result = judge_target_acceptance(metrics, gate)
+
+    assert result["accepted"] is False
+    assert "probability_spread_below_threshold" in result["reject_reasons"]
+    assert "trained_tree_count_below_threshold" in result["reject_reasons"]
+
+
 def test_judge_target_acceptance_accepts_exact_fallback_lift_threshold():
     metrics = {
         "baseline_rate": 0.55,

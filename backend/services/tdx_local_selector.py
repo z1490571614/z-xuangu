@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from backend.services.daily_basic_fallback import get_daily_basic_with_previous_fallback
+
 logger = logging.getLogger(__name__)
 
 PRICE_SCALE = 100.0
@@ -218,6 +220,40 @@ class TdxLocalSelectorService:
         logger.info(f"本地选股跳过停牌检查（需要Tushare）")
         self._suspend_set = set()
 
+    def _get_trading_calendar_for_daily_basic(self, data_collector, trade_date: str) -> set:
+        if not data_collector:
+            return set()
+        try:
+            year = int(trade_date[:4])
+            try:
+                return set(data_collector.get_trading_calendar(year)) | set(data_collector.get_trading_calendar(year - 1))
+            except TypeError:
+                return set(data_collector.get_trading_calendar())
+        except Exception as e:
+            logger.warning(f"获取 daily_basic 回退交易日历失败: {e}")
+            return set()
+
+    def _build_circ_mv_map(self, trade_date: str, data_collector=None) -> Dict[str, float]:
+        circ_mv_map: Dict[str, float] = {}
+        if not data_collector:
+            return circ_mv_map
+
+        try:
+            calendar = self._get_trading_calendar_for_daily_basic(data_collector, trade_date)
+            db = get_daily_basic_with_previous_fallback(
+                data_collector,
+                trade_date,
+                calendar=calendar,
+                purpose="本地日线选股市值过滤",
+            )
+            if db is not None and not db.empty:
+                for row in db.itertuples():
+                    if row.circ_mv:
+                        circ_mv_map[row.ts_code] = row.circ_mv / 10000  # 万元→亿
+        except Exception as e:
+            logger.warning(f"获取市值数据失败: {e}")
+        return circ_mv_map
+
     def select(
         self,
         trade_date: str,
@@ -252,16 +288,7 @@ class TdxLocalSelectorService:
         self._ensure_suspend_set(trade_date)
 
         # 3. 获取市值数据
-        circ_mv_map = {}
-        if data_collector:
-            try:
-                db = data_collector.get_daily_basic(trade_date=trade_date)
-                if db is not None and not db.empty:
-                    for row in db.itertuples():
-                        if row.circ_mv:
-                            circ_mv_map[row.ts_code] = row.circ_mv / 10000  # 万元→亿
-            except Exception as e:
-                logger.warning(f"获取市值数据失败: {e}")
+        circ_mv_map = self._build_circ_mv_map(trade_date, data_collector)
 
         # 4. 逐股筛选
         all_stocks = []

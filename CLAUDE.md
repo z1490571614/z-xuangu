@@ -395,181 +395,40 @@ news_item → normalize_text → classify_news_scope
 
 **模块位置**
 - 模型引擎: `backend/services/model_engine/lightgbm_service.py`
-- 特征构建: `backend/services/backtest/leader_main_t0_feature_builder.py`
-- 标签生成: `backend/services/backtest/leader_main_t0_label_builder.py`
 - 竞价数据: `backend/services/auction_data_service.py`
 - 回测API: `backend/api/backtest.py`
 - 选股集成: `backend/services/stock_selector.py`
-- 训练脚本: `scripts/train_leader_main_t0_pipeline.py`
-- 数据模型: `backend/models/auction_backtest.py` (StockAuctionOpen + LeaderMainT0TrainingSample)
 - 版本管理: `backend/models/stock_feature_snapshot.py` (ModelVersion)
 - 模型文件目录: `backend/models/` (*.pkl)
 
-**双模型架构**:
-
-| 属性 | `active_auction_lgbm` | `leader_main_t0_lgbm` |
-|------|----------------------|----------------------|
-| 用途 | 竞价活跃度综合评分 | 龙头股T+0封板概率 |
-| 特征数 | 8维 | **9维** (v2026-05精简) |
-| 数据源 | StockFeatureSnapshot | LeaderMainT0TrainingSample |
-| 影响final_score | ✅ 权重35% | ✅ 权重10% |
-| 预测写入字段 | `model_score` | `t0_limit_success_prob` |
-| 版本管理 | 文件名+ModelVersion表 | ModelVersion表(is_active标记) |
-
-**龙头T+0模型9维特征**（v2026-05 从13维精简）:
-```
-limit_up_streak         — 连续涨停天数（龙头核心标识）
-limit_up_count_100d     — 近100日涨停次数
-seal_rate_100d          — 近100日封板率(%)
-rise_10d_pct            — 近10日涨幅(%)
-pre_change_pct          — 昨日涨跌幅(%)
-open_change_pct         — 今日开盘涨幅(%)
-auction_ratio           — 竞昨比（小数，如 0.08 = 8%）
-auction_turnover_rate   — 竞价换手率（%，如 1.64 = 1.64%）
-circ_mv                 — 流通市值(亿)
-```
-
-**已移除的4维及原因**（不能加回来除非数据条件改善）:
-- `market_height_rank` — 与 limit_up_streak 高度共线（连板天数直接决定排名）
-- `rise_5d_pct` — 与 rise_10d_pct 部分共线（5天包含在10天内）
-- `sector_change_pct` — 数据源不稳定，常默认填0，模型无法学到有效信号
-- `sector_limit_up_count` — 同上
-
-**核心公式**:
-
-竞昨比 `auction_ratio`:
-```
-auction_ratio = 竞价成交量(股) / T-1日成交量(股) → 小数，如 0.08 表示 8%
-```
-- Tushare `stk_auction.vol` → 股；Tushare `daily.vol` → **手**，需 ×100 转股
-- `.day` 文件 `vol` 解析时 `/100` → **手** (TDX_VOL_TO_TUSHARE_VOL_SCALE=100)
-- `StockDailyData.vol` → **手**（与 Tushare daily.vol 格式一致）
-- **两条数据路径都需在调用 `calculate_auction_metrics` 前将分母 ×100 转为股！**
-  - Tushare同步路径: `sync_auction_open()` 中 `prev_volume = {k: v*100 ...}`
-  - .day重算路径: `recalculate_auction_ratios_from_daily_cache()` 中 `prev_volume = {k: row.vol*100 ...}`
-
-竞价换手率 `auction_turnover_rate`:
-```
-auction_turnover_rate = 竞价量(股) / (流通股本(万股) × 10000) × 100 → 百分比，如 1.64 表示 1.64%
-```
-- 优先用 `free_share`，缺失降级 `float_share`（Tushare daily_basic，单位万股）
-
-**DEFAULT_CONFIG 过滤器阈值**（`leader_main_t0_feature_builder.py`）:
-- `min_auction_ratio=0.04, max_auction_ratio=0.30` — 适配小数格式（4%~30%）
-- `min_auction_turnover_rate=0.5, max_auction_turnover_rate=10` — 百分比格式（0.5%~10%）
-- **⚠️ 如果改了竞昨比公式的输出格式，必须同步改 DEFAULT_CONFIG 和 RuleScoreService 阈值**
-
-**RuleScoreService 竞昨比阈值**（`rule_score_service.py::score_auction_momentum`）:
-```python
->= 0.20 → 极高(15分); >= 0.10 → 较高(12分); >= 0.05 → 适中(8分)
->= 0.03 → 较低(5分);  < 0.03 → 偏低(2分)
-# 显示时需 ×100: f"{auction_ratio * 100:.2f}%"
-```
-
-**T+0标签定义**（`leader_main_t0_label_builder.py`）:
-```
-一字板: open>=limit*0.997 AND high>=limit*0.997 AND low>=limit*0.997 AND close>=limit*0.997
-  → label_t0_limit_success = NULL （排除出训练集）
-
-非一字板 + 最高价触板 + 收盘封板:
-  high >= limit*0.997 AND close >= limit*0.997
-  → label = 1 （T+0封板成功）
-
-其他 → label = 0 （失败）
-```
-涨停价: 300/301/688/689开头 → 20%；其他 → 10%
-
-**训练管线**（6步，必须按序执行，可用 `scripts/train_leader_main_t0_pipeline.py` 一键运行）:
-```
-1. 同步集合竞价数据   → AuctionDataService.sync_auction_open_date_range()
-2. 同步本地日线数据   → TdxLocalDailySyncService.sync_range()
-3. 重算竞昨比         → AuctionDataService.recalculate_auction_ratios_from_daily_cache()
-4. 构建候选股特征     → LeaderMainT0FeatureBuilder.build_leader_main_t0_range()
-5. 生成T+0标签        → LeaderMainT0LabelBuilder.build_leader_main_t0_labels()
-6. 训练模型           → train_leader_main_t0_lgbm()
-```
-⚠️ Step 3 必须在 Step 1 之后运行——重算路径用 StockDailyData.vol 修正 Tushare 路径的竞昨比。
-
-**候选股过滤规则**（`DEFAULT_CONFIG`）:
-
-| 条件 | 阈值 | 备注 |
-|------|------|------|
-| 流通市值 | < 2000亿 | |
-| 收盘价 | < 500元 | |
-| 近10日涨幅 | > 0 | |
-| 近100日涨停次数 | >= 3 | |
-| 封板率 | >= 80% | |
-| 开盘涨幅 | >= -3% | |
-| 竞昨比 | 0.04~0.30 (小数) | 对应4%~30%，格式变更于2026-05 |
-| 竞价换手率 | 0.5%~10% | 百分比格式 |
-| 非ST/非停牌/非北交所 | 必须 | |
-
-**模型超参数**:
-```python
-LGBMClassifier(
-    objective='binary', boosting_type='gbdt',
-    learning_rate=0.05, num_leaves=31,
-    n_estimators=500, subsample=0.8, colsample_bytree=0.8,
-    metric='auc', random_state=42, verbose=-1,
-    is_unbalance=True,  # v2026-05: 自动处理正负样本不均衡
-)
-# early_stopping=50, 数据分割70/20/10(按时间顺序)
-# 滚动窗口CV: 3折时间序列, min_train=30, min_test=5
-```
+**当前职责**: 保留竞价通用模型 `active_auction_lgbm` 的训练、预测、版本记录和选股评分集成；T+0封板概率由默认竞价接力三目标模型体系负责。
 
 **预测集成至选股管线**（`stock_selector.py::_merge_and_score_candidates`）:
 ```
 Phase A: 规则评分 (RuleScoreService) → rule_score
 Phase B: 按 rule_score 降序排序
 Phase C: batch_predict_before_selection() → model_score
-Phase D: batch_predict_leader_main_t0() → t0_limit_success_prob
-Phase E: final_score = rule_score*0.55 + model_score*0.35 + t0_prob*0.10
-         (任一模型不可用时按权重归一化)
-Phase F: 评分等级分配 + 持久化至 SelectedStock
+Phase D: final_score = rule_score/model_score 按可用权重归一化
+Phase E: 评分等级分配 + 持久化至 SelectedStock
 ```
 
 **模型版本管理**:
-- 每次训练生成 `leader_main_t0_lgbm_{YYYYMMDD_HHMMSS}.pkl`
-- DB `model_version` 表: model_name, version, feature_cols(JSON), model_path, metrics(JSON), is_active, params(JSON)
-- 新版本激活时旧版本自动 `is_active=0`
-- `batch_predict_model()` 从 `ModelVersion` 读取活跃模型的特征列（不硬编码）
-- `batch_predict_before_selection()` 硬编码 `FEATURE_COLS`（8列，遗留设计）
+- DB `model_version` 表记录 model_name、version、feature_cols、model_path、metrics、is_active、params。
+- `batch_predict_model()` 从 `ModelVersion` 读取活跃模型的特征列。
+- `batch_predict_before_selection()` 仍服务于竞价通用评分模型，缺模型时返回空预测，不阻断选股。
 
-**夜间自动训练**: `nightly_train()` 同时训练两个模型，覆盖近2年数据。
+**关键数据单位**:
+- Tushare `stk_auction.vol` → 股；Tushare `daily.vol` → 手。
+- `.day` 文件 `vol` 解析时 `/100` → 手，成交额 `/1000`。
+- 涉及竞价量/昨日成交量比值时，分母需统一成股后再计算。
 
-**SHAP 可解释性**:
-- `_compute_shap_importance(model, X, feature_cols)` — 训练后计算 mean|SHAP| 存入 metrics
-- `explain_leader_main_t0_prediction(features)` — 单预测特征贡献解释
-- `shap` 为可选依赖，不可用时 SHAP 指标为 None，不影响训练和预测
-
-**当前模型指标**（v20260510_040441, 2026-05-10训练）:
-| 指标 | 值 |
-|------|-----|
-| 训练样本 | 2154 (正687/负1467) |
-| AUC | 0.6957 |
-| CV AUC (3折) | 0.671 ± 0.038 |
-| Precision@0.25 | 0.39 |
-| Recall@0.25 | 0.84 |
-| Top SHAP特征 | open_change_pct(0.41), auction_turnover_rate(0.28), pre_change_pct(0.11) |
-
-**⚠️ 注意事项**:
-- `is_unbalance=True` 会压低概率输出，默认0.5阈值下 Precision/Recall 不理想，需从 `threshold_evaluation` 选最优阈值（推荐 0.25~0.30）
-- `batch_predict_before_selection` 硬编码 `FEATURE_COLS`（8列），不从 `ModelVersion` 读取（遗留设计）
-- `.day` 文件数据单位: 成交量需 `/100`(转手)，成交额需 `/1000` — `StockDailyData.vol` 是**手**
-- `joblib` 为可选依赖，缺失时所有预测返回 `None`，不影响核心选股
-- `shap` 为可选依赖，缺失时 SHAP 指标为 None
-- T+0免责声明: `"T+0成功率由历史样本模型估算，仅作排序参考，不构成投资建议"`
-- 训练管线脚本: `scripts/train_leader_main_t0_pipeline.py --start YYYYMMDD --end YYYYMMDD`
+**已移除项**:
+- 旧 T0 参考模型流水线已于 2026-05-19 删除，相关训练脚本、样本表、模型文件、API端点、前端展示列和选股结果字段均不再保留。
 
 **API端点**:
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/v1/model/status` | GET | 活跃模型版本/特征列/评估指标 |
-| `/api/v1/backtest/leader-main-t0/run` | POST | 一键完整管线 |
-| `/api/v1/backtest/leader-main-t0/build` | POST | 构建训练样本 |
-| `/api/v1/backtest/leader-main-t0/labels` | POST | 生成标签 |
-| `/api/v1/backtest/leader-main-t0/train` | POST | 训练模型 |
-| `/api/v1/backtest/leader-main-t0/samples` | GET | 分页查询样本 |
 | `/api/v1/backtest/auction/sync` | POST | 单日竞价同步 |
 | `/api/v1/backtest/auction/sync-range` | POST | 区间竞价同步 |
 | `/api/v1/backtest/tdx-local-daily/sync` | POST | 本地日线同步 |
@@ -792,10 +651,10 @@ Tushare `top_inst` 接口可能需要5000积分，积分不足时返回空数据
 - 消息面和龙虎榜为可选数据源，缺失时不影响主评分
 
 **Q13: LightGBM模型预测返回None?**
-- 检查 `backend/models/` 目录下是否存在 `.pkl` 模型文件（当前: `leader_main_t0_lgbm_{timestamp}.pkl`）
+- 检查 `backend/models/` 目录下是否存在当前活跃模型对应的 `.pkl` 文件
 - 检查 `joblib` 是否已安装（`pip install joblib`）
 - 检查 `model_version` 表中是否有 `is_active=1` 的版本记录
-- 模型不可用时不影响核心选股，`t0_limit_success_prob` 为 `None` 属正常降级
+- 模型不可用时不影响核心选股，默认竞价三目标预测字段为空属正常降级
 - 如果模型文件存在但预测仍返回 None，检查 `model_version.feature_cols` 是否与当前特征名匹配
 
 **Q14: 竞昨比数值异常（过大或为0）?**
@@ -972,9 +831,9 @@ feat(board): 实现东财板块动态别名
 
 **LightGBM模型监控**:
 - `model_version` 表活跃模型版本数
-- `leader_main_t0_training_sample` 表样本量/正负比例
+- `default_auction_training_sample` 表样本量/正负比例/标签覆盖率
 - 模型AUC/准确率/精确率/召回率趋势
-- 预测覆盖率（`t0_limit_success_prob` 非空比例）
+- 默认竞价三目标预测字段覆盖率
 - 模型文件大小与加载耗时
 
 **默认竞价接力模型监控**:

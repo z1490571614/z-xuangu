@@ -206,33 +206,57 @@ class TushareDataCollector:
         """
         if not ts_codes:
             return {}
-        codes = [c.split('.')[0] for c in ts_codes]
+        pairs = [(c.split('.')[0], c) for c in ts_codes]
         result = {}
         base_url = "http://192.168.10.109:8080/api/quote"
         try:
+            batch_size = int(os.getenv("REALTIME_QUOTE_BATCH_SIZE", "60"))
+        except ValueError:
+            batch_size = 60
+        batch_size = max(1, batch_size)
+        try:
             with httpx.Client(timeout=15.0) as client:
-                resp = client.get(base_url, params={"code": ",".join(codes)})
-                resp.raise_for_status()
-                data = resp.json()
-                if data.get("code") == 0 and data.get("data"):
-                    for item in data["data"]:
-                        raw_code = item.get("Code", "")
-                        ts_code = None
-                        for c in ts_codes:
-                            if c.startswith(raw_code):
-                                ts_code = c
-                                break
+                for start in range(0, len(pairs), batch_size):
+                    batch_pairs = pairs[start:start + batch_size]
+                    raw_codes = [raw_code for raw_code, _ in batch_pairs]
+                    code_map = {raw_code: ts_code for raw_code, ts_code in batch_pairs}
+                    try:
+                        resp = client.get(base_url, params={"code": ",".join(raw_codes)})
+                        resp.raise_for_status()
+                        data = resp.json()
+                    except Exception as e:
+                        logger.warning(f"批量获取实时行情分批失败: {raw_codes[:3]}... 数量={len(raw_codes)}, 错误={e}")
+                        continue
+
+                    if data.get("code") != 0:
+                        logger.warning(
+                            f"批量获取实时行情分批返回失败: {raw_codes[:3]}... "
+                            f"数量={len(raw_codes)}, message={data.get('message')}"
+                        )
+                        continue
+
+                    for item in data.get("data") or []:
+                        raw_code = str(item.get("Code", ""))
+                        ts_code = code_map.get(raw_code)
                         if ts_code is None:
                             continue
                         k = item.get("K", {})
+                        total_hand = item.get("TotalHand")
                         result[ts_code] = {
                             "open": k.get("Open", 0) / 1000 if k.get("Open") else None,
                             "pre_close": k.get("Last", 0) / 1000 if k.get("Last") else None,
                             "close": k.get("Close", 0) / 1000 if k.get("Close") else None,
                             "high": k.get("High", 0) / 1000 if k.get("High") else None,
                             "low": k.get("Low", 0) / 1000 if k.get("Low") else None,
+                            "volume_hand": total_hand,
+                            "volume": total_hand * 100 if total_hand is not None else None,
+                            "amount": item.get("Amount"),
+                            "server_time": item.get("ServerTime"),
                         }
-            logger.info(f"批量获取实时行情成功: {len(result)}/{len(ts_codes)} 只")
+            logger.info(
+                f"批量获取实时行情成功: {len(result)}/{len(ts_codes)} 只, "
+                f"batch_size={batch_size}"
+            )
             return result
         except Exception as e:
             logger.warning(f"批量获取实时行情失败: {e}")

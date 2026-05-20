@@ -154,3 +154,100 @@ def test_merge_keeps_auction_metrics_out_of_phase2(monkeypatch):
 
     assert merged[0]["auction_ratio"] is None
     assert merged[0]["auction_turnover_rate"] is None
+
+
+def test_merge_fills_blank_local_stock_name_from_phase2_stock_basic(monkeypatch):
+    def no_local_fallback(self, phase1_stocks, trade_date, seal_rates):
+        return {}
+
+    monkeypatch.setattr(
+        StockSelectorService,
+        "_build_phase1_metric_fallbacks",
+        no_local_fallback,
+    )
+
+    phase1 = {
+        "stocks": [
+            type("Stock", (), {
+                "ts_code": "002181.SZ",
+                "name": "",
+                "close": 10.0,
+                "change_pct": 5.0,
+                "pre_change_pct": 1.0,
+                "open_change_pct": 2.0,
+                "auction_ratio": 4.67,
+                "auction_turnover_rate": 1.27,
+                "limit_up_count": 3,
+                "rise_10d_pct": 12.0,
+                "industry": None,
+                "concept": None,
+            })()
+        ]
+    }
+    phase2 = {"analysis": {"002181.SZ": {"name": "粤传媒", "industry": "文化传媒", "circ_mv": 100000}}}
+
+    merged = StockSelectorService()._merge_results(
+        phase1,
+        phase2,
+        {"seal_rates": {}},
+        min_open_change_pct=None,
+        min_seal_rate=None,
+        trade_date="20260518",
+    )
+
+    assert merged[0]["name"] == "粤传媒"
+
+
+def test_merge_overwrites_daily_change_with_realtime_phase2_change(monkeypatch):
+    def no_local_fallback(self, phase1_stocks, trade_date, seal_rates):
+        return {}
+
+    monkeypatch.setattr(
+        StockSelectorService,
+        "_build_phase1_metric_fallbacks",
+        no_local_fallback,
+    )
+
+    phase1 = {
+        "stocks": [
+            type("Stock", (), {
+                "ts_code": "002181.SZ",
+                "name": "粤传媒",
+                "close": 10.0,
+                "change_pct": 5.0,
+                "pre_change_pct": 5.0,
+                "open_change_pct": 2.0,
+                "auction_ratio": 4.67,
+                "auction_turnover_rate": 1.27,
+                "limit_up_count": 3,
+                "rise_10d_pct": 12.0,
+                "industry": "文化传媒",
+                "concept": None,
+            })()
+        ]
+    }
+    phase2 = {
+        "analysis": {
+            "002181.SZ": {
+                "close": 10.8,
+                "change_pct": 8.0,
+                "pre_change_pct": 5.0,
+                "open_change_pct": 3.0,
+                "circ_mv": 100000,
+            }
+        }
+    }
+
+    merged = StockSelectorService()._merge_results(
+        phase1,
+        phase2,
+        {"seal_rates": {}},
+        min_open_change_pct=None,
+        min_seal_rate=None,
+        trade_date="20260518",
+    )
+
+    assert merged[0]["close"] == 10.8
+    assert merged[0]["close_price"] == 10.8
+    assert merged[0]["change_pct"] == 8.0
+    assert merged[0]["pre_change_pct"] == 5.0

@@ -12,6 +12,8 @@ class AcceptanceGate:
     top5_lift: float
     min_topk_positive_count: int
     min_auc: float
+    min_probability_spread: float = 0.0
+    min_trained_tree_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -19,7 +21,14 @@ class AcceptanceGate:
 
 TARGET_GATES = {
     "default_auction_t0_limit_lgbm": AcceptanceGate(0.08, 0.05, 20, 0.55),
-    "default_auction_t1_premium_lgbm": AcceptanceGate(0.10, 0.06, 25, 0.55),
+    "default_auction_t1_premium_lgbm": AcceptanceGate(
+        0.10,
+        0.06,
+        25,
+        0.55,
+        min_probability_spread=5.0,
+        min_trained_tree_count=5,
+    ),
     "default_auction_t1_continue_lgbm": AcceptanceGate(0.06, 0.04, 10, 0.53),
 }
 
@@ -159,6 +168,8 @@ def judge_target_acceptance(metrics: Dict[str, Any], gate: AcceptanceGate) -> Di
     top5_lift = _metric_lift(metrics, "top5_lift", "top5_rate")
     topk_positive_count = int(_safe_float(metrics.get("topk_positive_count")))
     auc = metrics.get("auc")
+    probability_spread = _safe_float(metrics.get("probability_spread"))
+    trained_tree_count = int(_safe_float(metrics.get("trained_tree_count")))
 
     tolerance = 1e-9
     if top3_lift + tolerance < gate.top3_lift:
@@ -169,6 +180,10 @@ def judge_target_acceptance(metrics: Dict[str, Any], gate: AcceptanceGate) -> Di
         reject_reasons.append("topk_positive_count_below_threshold")
     if auc is None or _safe_float(auc) < gate.min_auc:
         reject_reasons.append("auc_below_threshold")
+    if gate.min_probability_spread > 0 and probability_spread + tolerance < gate.min_probability_spread:
+        reject_reasons.append("probability_spread_below_threshold")
+    if gate.min_trained_tree_count > 0 and trained_tree_count < gate.min_trained_tree_count:
+        reject_reasons.append("trained_tree_count_below_threshold")
 
     return {
         "accepted": not reject_reasons,

@@ -8,7 +8,7 @@ from backend.models.system_config import SystemConfig
 from backend.models.scheduled_task import ScheduledTask
 from backend.models.strategy_template import StrategyTemplate
 from backend.models.stock_feature_snapshot import StockFeatureSnapshot, StockDetailSnapshot, ModelVersion
-from backend.models.auction_backtest import StockAuctionOpen, LeaderMainT0TrainingSample
+from backend.models.auction_backtest import StockAuctionOpen
 from backend.models.scoring_v2 import StockScoreV2, StockScoreBreakdownV2, StockRiskBreakdownV2
 from backend.models.anomaly_interpretation import StockAnomalyInterpretation
 from backend.models.overview_brief import StockOverviewBrief
@@ -27,6 +27,13 @@ from backend.models.board import (
 )
 from backend.models.model_training_job import ModelTrainingJob
 from backend.models.default_auction_training_sample import DefaultAuctionTrainingSample
+from backend.models.default_auction_auto_learning_run import DefaultAuctionAutoLearningRun
+from backend.models.local_market_data import StockMinuteBar
+from backend.models.t0_simulation_backtest import (
+    T0SimulationBacktestRun,
+    T0SimulationBacktestDaily,
+    T0SimulationBacktestTrade,
+)
 from backend.auth.models import User
 
 __all__ = [
@@ -40,7 +47,6 @@ __all__ = [
     "StockDetailSnapshot",
     "ModelVersion",
     "StockAuctionOpen",
-    "LeaderMainT0TrainingSample",
     "StockScoreV2",
     "StockScoreBreakdownV2",
     "StockRiskBreakdownV2",
@@ -60,5 +66,10 @@ __all__ = [
     "DcBoardAliasSyncState",
     "ModelTrainingJob",
     "DefaultAuctionTrainingSample",
+    "DefaultAuctionAutoLearningRun",
+    "StockMinuteBar",
+    "T0SimulationBacktestRun",
+    "T0SimulationBacktestDaily",
+    "T0SimulationBacktestTrade",
     "User",
 ]

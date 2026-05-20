@@ -9,11 +9,11 @@ def test_model_status_returns_active_model_versions(client, db):
     Base.metadata.create_all(bind=engine)
     db.add(
         ModelVersion(
-            model_name="leader_main_t0_lgbm",
+            model_name="active_auction_lgbm",
             version="v20240510",
             feature_cols=json.dumps(["auction_ratio"], ensure_ascii=False),
             model_metrics=json.dumps({"auc": 0.71}, ensure_ascii=False),
-            model_path="models/leader_main_t0_lgbm.pkl",
+            model_path="models/active_auction_lgbm.pkl",
             is_active=1,
         )
     )
@@ -23,17 +23,17 @@ def test_model_status_returns_active_model_versions(client, db):
 
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert data["models"]["leader_main_t0_lgbm"]["version"] == "v20240510"
-    assert data["models"]["leader_main_t0_lgbm"]["feature_cols"] == ["auction_ratio"]
-    assert data["models"]["leader_main_t0_lgbm"]["metrics"]["auc"] == 0.71
+    assert data["models"]["active_auction_lgbm"]["version"] == "v20240510"
+    assert data["models"]["active_auction_lgbm"]["feature_cols"] == ["auction_ratio"]
+    assert data["models"]["active_auction_lgbm"]["metrics"]["auc"] == 0.71
 
 
 def test_model_status_enabled_when_active_model_file_exists(client, db, monkeypatch, tmp_path):
     Base.metadata.create_all(bind=engine)
-    model_path = str(tmp_path / "leader_main_t0_lgbm.pkl")
+    model_path = str(tmp_path / "active_auction_lgbm.pkl")
     db.add(
         ModelVersion(
-            model_name="leader_main_t0_lgbm_status_enabled",
+            model_name="active_auction_lgbm_status_enabled",
             version="v20260509",
             feature_cols=json.dumps(["auction_ratio"], ensure_ascii=False),
             model_metrics=json.dumps({"auc": 0.72}, ensure_ascii=False),

@@ -5,9 +5,9 @@
 | 属性 | 值 |
 |------|-----|
 | **项目名称** | 选股通知系统(Stock Selector Notification System) |
-| **版本** | v6.0 |
+| **版本** | v7.1 |
 | **状态** | 评分系统V3 + AI综合概览 + 异动解读 + 龙虎榜 + 风险拆解 + 龙头战法 + 板块动态别名 + 事件驱动情感分析 + 默认竞价接力三目标 + 模型中心已完成 ✅ |
-| **最后更新** | 2026-05-17 |
+| **最后更新** | 2026-05-18 |
 
 ---
 
@@ -229,8 +229,6 @@ SEAT_PREMIUM = ["相城大道", ...]  # 各模块自行维护列表
 │  │  • ThsBoardService (同花顺板块词典)                     │  │
 │  │  • StrategyService (策略服务)                          │  │
 │  │  • LightGBMService (竞价模型训练+预测+版本管理)         │  │
-│  │  • LeaderMainT0FeatureBuilder (特征工程+候选过滤)       │  │
-│  │  • LeaderMainT0LabelBuilder (T+0标签生成)               │  │
 │  │  • ConnectionManager (WebSocket连接管理)               │  │
 │  │  • TaskScheduler (任务调度)                            │  │
 │  │  • FeishuNotifier (飞书通知)                           │  │
@@ -679,70 +677,27 @@ dragon_leader/
 
 **位置**: `backend/services/model_engine/lightgbm_service.py`
 
-**数据模型**: `backend/models/stock_feature_snapshot.py` (StockFeatureSnapshot + ModelVersion) + `backend/models/auction_backtest.py` (StockAuctionOpen + LeaderMainT0TrainingSample)
+**数据模型**: `backend/models/stock_feature_snapshot.py` (StockFeatureSnapshot + ModelVersion) + `backend/models/auction_backtest.py` (StockAuctionOpen)
 
 **模型文件**: `backend/models/*.pkl`
 
-**前端展示**: `Dashboard.vue` (模型状态卡片) + `StockResults.vue` (T+0封板概率列)
+**前端展示**: `Dashboard.vue` + `StockResults.vue` 的默认竞价三目标模型列
 
 **定位**: 基于LightGBM的竞价选股模型，提供T+0封板概率预测，集成至四阶段选股管线。
 
-**双模型架构**:
-
-| 属性 | `active_auction_lgbm` | `leader_main_t0_lgbm` |
-|------|----------------------|----------------------|
-| 用途 | 竞价活跃度综合评分 | 龙头股T+0封板概率 |
-| 特征数 | 8维(limit_up_count_100d, seal_rate_100d, rise_10d_pct, pre_change_pct, open_change_pct, auction_turnover_rate, auction_ratio, circ_mv) | 9维(limit_up_streak, limit_up_count_100d, seal_rate_100d, rise_10d_pct, pre_change_pct, open_change_pct, auction_ratio, auction_turnover_rate, circ_mv) |
-| 数据源 | StockFeatureSnapshot | LeaderMainT0TrainingSample |
-| 影响final_score | ✅ 权重35% | ✅ 权重10% |
-| 预测字段 | `model_score` | `t0_limit_success_prob` |
-| 版本管理 | 文件名覆盖 | ModelVersion表(is_active标记) |
-
-**训练管线**（`backtest.py` API + `lightgbm_service.py`）:
-```
-1. POST /backtest/auction/sync-range      → 同步集合竞价原始数据(stk_auction)
-2. POST /backtest/tdx-local-daily/sync    → 同步通达信本地日线(.day文件→stock_daily_data)
-3. POST /backtest/auction/recalculate-ratios → 从日线缓存重算auction_ratio
-4. POST /backtest/leader-main-t0/build    → 特征构建(9维+规则过滤→LeaderMainT0TrainingSample)
-5. POST /backtest/leader-main-t0/labels   → T+0标签生成(label_t0_limit_success)
-6. POST /backtest/leader-main-t0/train    → 训练LGBMClassifier(70/20/10分割)
-      或 POST /backtest/leader-main-t0/run → 一键执行全管线
-```
-
-**候选股过滤**（`leader_main_t0_feature_builder.py::DEFAULT_CONFIG`）:
-| 条件 | 阈值 | 条件 | 阈值 |
-|------|------|------|------|
-| circ_mv | < 2000亿 | open_change_pct | >= -3% |
-| prev_close | < 500元 | auction_ratio | 0.04~0.30 |
-| rise_10d_pct | > 0 | auction_turnover_rate | 0.5%~10% |
-| limit_up_count_100d | >= 3 | seal_rate_100d | >= 80% |
-| 非ST/非停牌/非北交所 | 必须 | | |
-
-**T+0标签定义**（`leader_main_t0_label_builder.py`）:
-```
-一字板: open>=limit*0.997 AND high>=limit*0.997 AND low>=limit*0.997 AND close>=limit*0.997
-  → label = NULL (排除出训练集)
-非一字板 + high>=limit*0.997 + close>=limit*0.997 → label = 1 (封板成功)
-其他 → label = 0 (失败)
-涨停价: 300/301/688/689开头 → 20%, 其他 → 10%
-```
+**旧版说明**: `leader_main_t0_lgbm` 龙头T0参考模型、训练脚本、样本表和前端旧T0参考列已于 2026-05-19 移除。当前 T+0 相关能力由默认竞价接力三目标中的 `default_auction_t0_limit_lgbm` 承担。
 
 **预测集成**（`stock_selector.py::_merge_and_score_candidates`）:
 ```
 Phase A: 规则评分 → rule_score
 Phase B: 按rule_score降序排序
 Phase C: batch_predict_before_selection() → model_score
-         final_score = rule_score * 0.6 + model_score * 0.4
-Phase D: batch_predict_leader_main_t0() → t0_limit_success_prob
-Phase E: final_score = rule_score*0.55 + model_score*0.35 + t0_prob*0.10
+Phase D: final_score = rule_score/model_score 按可用权重归一化
 Phase E: 等级分配 + 持久化至SelectedStock
 ```
 
 **模型版本管理**:
-- 每次训练生成 `leader_main_t0_lgbm_{YYYYMMDD_HHMMSS}.pkl`
-- `model_version` 表记录: model_name, version, feature_cols(JSON), model_path, metrics(JSON), train_start_date, train_end_date, is_active
-- `batch_predict_model()` 从 `ModelVersion` 读取活跃模型的特征列（不硬编码）
-- 旧版本自动 `is_active=0`，支持回溯
+- 默认竞价接力三目标模型通过 `model_version` 表记录版本、特征列、模型路径、指标和激活状态。
 
 **降级策略**: `joblib` 缺失或模型文件不存在 → 所有预测返回 `None` → 不影响核心选股流程
 
@@ -753,154 +708,29 @@ Phase E: 等级分配 + 持久化至SelectedStock
 
 ### 11. 默认竞价接力V2（三目标模型）
 
-**位置**: `backend/services/model_engine/`
-
-**模块架构**:
-```
-model_engine/
-├── lightgbm_service.py                  # 竞价通用+龙头T+0双模型（已有）
-├── model_management_service.py          # 模型中心(训练任务+版本激活+预测刷新)
-├── default_auction_relay_job_service.py  # 三目标训练编排(创建/运行/诊断)
-├── default_auction_model_trainer.py      # 单目标LightGBM训练器
-├── default_auction_model_evaluator.py    # TopK评估+验收闸门
-├── default_auction_attribution_service.py # 特征质量+分桶归因+训练归因
-├── default_auction_sample_builder.py     # 训练样本构建(从选股记录)
-├── default_auction_label_builder.py      # 三目标标签辅助(T0/T1溢价/T1连板)
-├── default_auction_replay_service.py     # 历史回放入口
-└── replay_validation_service.py          # 回放验收(召回率/Jaccard/数量误差)
-```
-
-**数据模型**: `backend/models/default_auction_training_sample.py` (DefaultAuctionTrainingSample) + `backend/models/model_training_job.py` (ModelTrainingJob)
+**位置**: `backend/services/model_engine/` (10个模块) + `backend/models/default_auction_training_sample.py` + `backend/models/model_training_job.py`
 
 **API接入**: `backend/api/model_management.py`
 
-**定位**: 基于LightGBM的默认竞价接力三目标预测系统，三模型分别预测T+0封板、T+1溢价、T+1连板，支持多参数配置轮训、自动验收闸门、原子激活。
+**定位**: 基于LightGBM的默认竞价接力三目标预测系统。三模型分别预测T+0封板、T+1溢价、T+1连板，5种参数配置轮训、TopK验收闸门、原子激活。14维纯结构化特征（来自`SelectedStock`，不引入新闻/AI文本）。
 
 **三目标模型**:
 
-| 子模型 | 模型名 | 标签列 | 验收闸门 |
-|--------|--------|--------|---------|
-| T+0封板 | `default_auction_t0_limit_lgbm` | `label_t0_limit_success` | Top3 Lift≥0.08, Top5 Lift≥0.05, TopK正例≥20, AUC≥0.55 |
-| T+1溢价 | `default_auction_t1_premium_lgbm` | `label_t1_premium_success` | Top3 Lift≥0.10, Top5 Lift≥0.06, TopK正例≥25, AUC≥0.55 |
-| T+1连板 | `default_auction_t1_continue_lgbm` | `label_t1_continue_limit` | Top3 Lift≥0.06, Top5 Lift≥0.04, TopK正例≥10, AUC≥0.53 |
+| 子模型 | 标签列 | 验收闸门 |
+|--------|--------|---------|
+| `default_auction_t0_limit_lgbm` | `label_t0_limit_success` | Top3 Lift≥0.08, Top5 Lift≥0.05, AUC≥0.55 |
+| `default_auction_t1_premium_lgbm` | `label_t1_premium_success` | Top3 Lift≥0.10, Top5 Lift≥0.06, AUC≥0.55 |
+| `default_auction_t1_continue_lgbm` | `label_t1_continue_limit` | Top3 Lift≥0.06, Top5 Lift≥0.04, AUC≥0.53 |
 
-**14维特征** (`DEFAULT_AUCTION_FEATURES`):
-`auction_ratio`(竞昨比), `auction_turnover_rate`(竞价换手率), `open_change_pct`(开盘涨幅), `pre_change_pct`(昨涨幅), `limit_up_count`(涨停次数), `touch_days`(触板天数), `limit_up_days`(涨停天数), `seal_rate`(封板率), `rise_10d_pct`(近10日涨幅), `circ_mv`(流通市值), `prev_turnover_rate`(昨日换手率), `rule_score`(规则评分), `final_score`(最终评分), `risk_tags_count`(风险标签数)
+**训练特色**: 三目标串行训练 → 逐目标5参数配置轮训(balanced/conservative/shallow/wider/seed_retry) → TopK按交易日分桶评估 → 验收闸门(4指标) → 三目标全部通过后原子激活。
 
-**数据来源**: 纯结构化字段(来自 `SelectedStock`)，不引入新闻/公告/舆情/AI文本特征，避免标签和文本信息反哺模型。
+**回放验收**: 真实选股 vs 回放模拟 → recall/jaccard/count_error + 重复代码检测。标准：avg_recall≥0.80, avg_jaccard≥0.60, max_count_error≤0.30。
 
-**三目标标签定义**:
+**SelectedStock预测字段**: `default_t0_limit_prob`, `default_t1_premium_prob`, `default_t1_continue_prob`, `default_relay_score`, `default_relay_model_version`
 
-| 标签 | 成功条件 | 未知返回 None |
-|------|---------|--------------|
-| `label_t0_limit_success` | T日最高价触板(≥涨停价×0.997) + 收盘封板 | 涨跌停价/high/close 任一缺失 |
-| `label_t1_premium_success` | T+1开盘≥3%或最高≥5%或收盘≥3% | open/high/close 回报率全部缺失 |
-| `label_t1_continue_limit` | T+1最高价触板 + 收盘封板(连板) | 涨跌停价/high/close 任一缺失 |
+**选股集成**: 选股完成后自动后台线程刷新默认接力预测 → 非阻塞，失败不影响主流程。
 
-**一字板审计**: `is_t0_one_line_limit_up` / `is_t1_one_line_limit_up` — 开/高/低/收全部接近涨停价→一字板标记。一字板样本标签为NULL(排除出训练集)。
-
-**训练编排** (`default_auction_relay_job_service.py`):
-
-```
-create_job → run_job:
-  对每个目标模型(model_name, label_column):
-    → 样本查询(query samples with non-null label)
-    → 特征质量报告(build_feature_quality_report → usable_features)
-    → 时间顺序切分(70/15/15 train/val/test)
-    → 按参数配置轮训(max_attempts ≤ profile数):
-        → 训练LGBMClassifier
-        → TopK评估(evaluate_topk → 按交易日分桶取top1/3/5)
-        → 验收闸门(judge_target_acceptance)
-        → 通过则 break，否则尝试下一个配置
-    → 三目标全部通过验收:
-        → auto_activate? → 原子激活最新通过版本
-        → 否则 → status=passed
-    → 任一目标失败 → status=rejected
-```
-
-**5种参数配置** (`DEFAULT_PARAM_PROFILES`):
-
-| 配置名 | learning_rate | num_leaves | max_depth | reg_alpha | reg_lambda | subsample | n_estimators |
-|--------|--------------|------------|-----------|-----------|------------|-----------|-------------|
-| balanced_default | 0.05 | 31 | -1 | 0 | 0 | 0.8 | 500 |
-| conservative_regularized | 0.03 | 15 | 4 | 0.1 | 1.0 | 0.75 | 500 |
-| shallow_stable | 0.04 | 7 | 3 | 0.2 | 2.0 | 0.9 | 500 |
-| wider_ranker | 0.02 | 63 | 6 | 0.05 | 0.5 | 0.8 | 700 |
-| seed_retry | 0.03 | 15 | 4 | 0.1 | 1.0 | 0.75 | 500 |
-
-**TopK评估** (`evaluate_topk`):
-- 按交易日分组，按预测概率降序取每日 top1/top3/top5
-- 计算 top1_rate/top3_rate/top5_rate 相对 baseline_rate 的 lift
-- label 为 None/空字符串/非法数字的样本属于未知标签，不进入基准、胜率和 TopK 排名
-- `topk_positive_count` = 每日 top5 正例数量总和
-
-**验收闸门** (`TARGET_GATES`):
-- top3_lift / top5_lift / min_topk_positive_count / min_auc
-- 任一指标不达标 → reject_reasons 包含具体失败原因
-- 三目标全部通过验收后方可原子激活
-
-**特征质量报告** (`build_feature_quality_report`):
-- 自动检测 numeric/categorical 特征
-- 分类特征(score_level, lu_tag, lu_status) → ignored
-- 数值特征缺失率≥60% / 唯一值≤1 → dropped
-- 输出 usable_features 列表供训练使用
-
-**分桶归因** (`build_bucket_report`):
-- 对关键特征(auction_ratio/auction_turnover_rate/open_change_pct/seal_rate/rise_10d_pct)预定义分桶
-- 每桶计算正例率(bucket_positive_rate)相对基准的 lift
-- 每桶内取概率 top5 计算 top5_positive_rate
-- 输出结论(高于/不高于基准)
-
-**训练归因** (`build_training_attribution`):
-- Top8正贡献特征(按feature_importance排序)
-- 噪声特征(importance=0)
-- Best/Worst分桶(按lift排序)
-- 失败原因中文摘要 + 下次尝试建议
-
-**回放验收** (`replay_validation_service.py`):
-```
-validate_replay_against_real:
-  对最近N个交易日:
-    → 取真实选股列表(real_codes)
-    → 取回放模拟选股列表(replay_codes)
-    → 计算 recall/jaccard/count_error
-    → 检测重复代码
-  汇总: avg_recall≥0.80 + avg_jaccard≥0.60 + max_count_error≤0.30
-       + 无重复代码 → accepted
-```
-
-**模型版本管理**:
-- 每次训练生成 `{model_name}_{version}.pkl` (version = YYYYMMDD_HHMMSS_ffffff)
-- `model_version` 表: model_name, version, feature_cols(JSON), model_metrics(JSON), model_path, params(JSON), is_active
-- 激活新版本时原子更新——先 deactivate 同模型名下所有旧版本，再激活新版本
-- `is_active=1` 只允许每个模型名下一行
-
-**预测集成至SelectedStock**:
-| SelectedStock 字段 | 来源模型 | 说明 |
-|--------------------|---------|------|
-| `default_t0_limit_prob` | `default_auction_t0_limit_lgbm` | T+0封板概率 |
-| `default_t1_premium_prob` | `default_auction_t1_premium_lgbm` | T+1溢价概率 |
-| `default_t1_continue_prob` | `default_auction_t1_continue_lgbm` | T+1连板概率 |
-| `default_relay_score` | 综合计算 | 默认竞价接力综合评分 |
-| `default_relay_model_version` | 版本标识 | 活跃模型版本号 |
-
-**ModelTrainingJob 表**:
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `model_name` | VARCHAR(100) | 模型名(如 `default_auction_relay_v2`) |
-| `status` | VARCHAR(30) | pending/running/passed/rejected/failed |
-| `phase` | VARCHAR(50) | prepare/train:{model_name}/activate/accepted/rejected/failed |
-| `progress` | INTEGER | 0-100 |
-| `mode` | VARCHAR(20) | test/production |
-| `auto_activate` | INTEGER | 训练通过后是否自动激活(0/1) |
-| `params_json` | TEXT | 训练参数(profiles等) |
-| `acceptance_json` | TEXT | 验收结果(targets/all_accepted/activation) |
-| `attempts_json` | TEXT | 每次训练尝试的详情(metrics/acceptance) |
-| `logs_json` | TEXT | 时间线日志 |
-| `best_model_version` | VARCHAR(255) | 通过验收的最佳版本号 |
-| `best_model_path` | VARCHAR(500) | 最佳模型文件路径 |
-
-**降级策略**: 模型文件缺失或 `joblib`/`lightgbm` 不可用时，`default_t0_limit_prob` 等4个预测字段返回 `None`，不影响核心选股流程。
+> 完整特征列表、参数配置、标签定义、训练流程、评估器细节见 [CLAUDE.md §16](CLAUDE.md)。
 
 ### 12. 股票别名服务(StockAliasService)
 
@@ -943,7 +773,7 @@ validate_replay_against_real:
 **集成新闻**: `backend/services/integrated_news_service.py` — 统一新闻查询接口
 **飞书通知**: `backend/services/notification.py` — 选股结果+告警推送
 **告警服务**: `backend/services/alert_service.py` — 高错误率/高延迟/API不可用
-**模型引擎**: `backend/services/model_engine/lightgbm_service.py` — LightGBM双模型训练+预测+版本管理
+**模型引擎**: `backend/services/model_engine/lightgbm_service.py` — LightGBM训练+预测+版本管理
 **模型管理**: `backend/services/model_engine/model_management_service.py` — 训练任务/版本激活/预测刷新
 **默认接力编排**: `backend/services/model_engine/default_auction_relay_job_service.py` — 三目标训练编排(创建/运行/诊断)
 **默认接力训练器**: `backend/services/model_engine/default_auction_model_trainer.py` — 单目标训练(特征质量+时间切分+TopK评估)
@@ -953,8 +783,6 @@ validate_replay_against_real:
 **默认接力标签辅助**: `backend/services/model_engine/default_auction_label_builder.py` — T0/T1溢价/T1连板标签
 **历史回放**: `backend/services/model_engine/default_auction_replay_service.py` — 默认竞价策略历史回放入口
 **回放验收**: `backend/services/model_engine/replay_validation_service.py` — 召回率/Jaccard/数量误差
-**特征构建**: `backend/services/backtest/leader_main_t0_feature_builder.py` — 候选股9维特征+过滤
-**标签生成**: `backend/services/backtest/leader_main_t0_label_builder.py` — T+0涨停标签
 
 ### 16. 数据持久化
 
@@ -993,7 +821,6 @@ validate_replay_against_real:
 | `stock_feature_snapshot` | 特征快照 | ✅ |
 | `model_version` | LightGBM模型版本记录 | ✅ 新增 |
 | `stock_auction_open` | 集合竞价原始数据 | ✅ 新增 |
-| `leader_main_t0_training_sample` | 龙头T+0训练样本 | ✅ 新增 |
 | `model_training_job` | 模型训练任务(状态/阶段/验收/日志) | ✅ 新增 |
 | `default_auction_training_sample` | 默认竞价接力训练样本(14维+3标签) | ✅ 新增 |
 
@@ -1092,48 +919,20 @@ calculate_dragon_leader_score(ts_code, trade_date, force_refresh=False)
 7. 返回结果
 ```
 
-### LightGBM T+0训练与预测数据流
+### LightGBM 竞价模型训练与预测数据流
 
 ```
-训练管线(backtest API):
-  POST /backtest/leader-main-t0/run
-      ↓
-  1. 集合竞价同步
-     stk_auction → StockAuctionOpen 表
-      ↓
-  2. 日线数据同步
-     .day 文件 → stock_daily_data 表
-      ↓
-  3. 竞昨比重算
-     auction_vol / T-1 daily_vol → auction_ratio
-      ↓
-  4. 特征构建(LeaderMainT0FeatureBuilder)
-     候选股过滤(8条件) → 9维特征 → LeaderMainT0TrainingSample 表
-      ↓
-  5. 标签生成(LeaderMainT0LabelBuilder)
-     排除一字板 → T+0封板判断 → label_t0_limit_success
-      ↓
-  6. 模型训练(train_leader_main_t0_lgbm)
-     LGBMClassifier(500轮, 70/20/10) → leader_main_t0_lgbm_{version}.pkl
-     → ModelVersion 表(is_active=1)
-     → 评估指标: AUC/Accuracy/Precision/Recall + 9阈值评估
-
 预测管线(stock_selector.py):
   选股完成 → _merge_and_score_candidates()
       ↓
   batch_predict_before_selection()
      → 加载 active_auction_lgbm.pkl
      → 8维特征预测 → model_score (0-100)
-     → final_score = rule_score*0.6 + model_score*0.4
+     → final_score 按 rule_score/model_score 可用权重归一化
       ↓
-  batch_predict_leader_main_t0()
-     → 加载 leader_main_t0_lgbm_{version}.pkl (通过ModelVersion)
-     → 9维特征预测 → t0_limit_success_prob (0-1)
-     → 参与 final_score (权重10%)
+  持久化: model_score, final_score
       ↓
-  持久化: model_score, t0_limit_success_prob, t0_limit_success_model_version
-      ↓
-  前端展示: Dashboard.vue(模型状态卡) + StockResults.vue(T+0概率列)
+  前端展示: Dashboard.vue + StockResults.vue 默认竞价三目标列
 ```
 
 ---
@@ -1284,15 +1083,11 @@ server {
 - [x] 前端RiskBreakdown双模式 — 普通7维度+龙头战法三栏评分
 
 ### ✅ Phase 14: LightGBM竞价模型 - 已完成
-- [x] 双模型架构 — active_auction_lgbm(8维)+leader_main_t0_lgbm(9维精简版)
+- [x] 竞价通用模型 active_auction_lgbm(8维)
 - [x] 模型引擎(lightgbm_service) — 训练+批量预测+版本管理
-- [x] T+0特征构建(LeaderMainT0FeatureBuilder) — 9维+8条件过滤
-- [x] T+0标签生成(LeaderMainT0LabelBuilder) — 一字板排除+封板判定
-- [x] 回测管线API(backtest.py) — 竞价同步→特征→标签→训练一键执行
-- [x] 选股管线集成(stock_selector.py) — model_score影响final_score(40%)
+- [x] 选股管线集成(stock_selector.py) — model_score参与final_score
 - [x] 模型状态API(/api/v1/model/status) — 活跃版本+特征+指标查询
-- [x] 前端展示 — Dashboard模型状态卡+StockResults T+0概率列
-- [x] 测试覆盖 — 6个测试文件47个用例
+- [x] 旧版 leader_main_t0_lgbm 参考模型已于2026-05-19移除
 
 ### ✅ Phase 15: 默认竞价接力V2 + 模型中心 - 已完成
 - [x] 默认竞价接力三目标模型(T0封板+T1溢价+T1连板)
@@ -1660,6 +1455,6 @@ fix(risk): 修复龙虎风险席位方向判定
 
 ---
 
-**Last Updated**: 2026-05-17
+**Last Updated**: 2026-05-18
 **Maintainer**: AI Assistant
-**Version**: 7.0
+**Version**: 7.1

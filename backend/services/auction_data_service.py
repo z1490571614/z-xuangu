@@ -12,6 +12,7 @@ from backend.database import SessionLocal
 from backend.models.auction_backtest import StockAuctionOpen
 from backend.models.seal_rate import StockDailyData
 from backend.services.data_collector import TushareDataCollector
+from backend.services.daily_basic_fallback import get_daily_basic_with_previous_fallback
 from backend.utils.trading_date import get_previous_trading_day
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,12 @@ class AuctionDataService:
             return 0
 
         prev_daily_df = self.collector.get_daily_data(trade_date=prev_date)
-        daily_basic_df = self.collector.get_daily_basic(trade_date=trade_date)
+        daily_basic_df = get_daily_basic_with_previous_fallback(
+            self.collector,
+            trade_date,
+            calendar=calendar,
+            purpose="开盘竞价同步",
+        )
 
         prev_volume_raw = self._map_by_code(prev_daily_df, "vol")
         prev_volume = prev_volume_raw

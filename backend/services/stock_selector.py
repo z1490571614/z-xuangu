@@ -22,12 +22,14 @@ except Exception:
     class McpTemporaryUnavailable(RuntimeError):
         pass
 from backend.services.data_collector import TushareDataCollector
+from backend.services.daily_basic_fallback import get_daily_basic_with_previous_fallback
+from backend.services.default_db_tushare_selector import DefaultDbTushareSelectorService
+from backend.services.default_local_tushare_selector import DefaultLocalTushareSelectorService
 from backend.services.seal_rate_calculator import SealRateCalculator
 from backend.services.scoring.rule_score_service import RuleScoreService
 from backend.services.scoring.next_day_plan import NextDayPlanService
 from backend.services.model_engine.lightgbm_service import (
     batch_predict_before_selection,
-    batch_predict_leader_main_t0,
 )
 from backend.services.scoring_v2 import StockScoringV2Service, is_score_v2_enabled
 from backend.models import SelectionRecord, SelectedStock, StockFeatureSnapshot
@@ -66,6 +68,7 @@ class StockSelectorService:
         min_seal_rate: Optional[float] = None,
         period_days: int = 100,
         min_open_change_pct: Optional[float] = -3.0,
+        selection_channel: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         执行三阶段选股
@@ -85,7 +88,7 @@ class StockSelectorService:
             tasks = [TASK_TEMPLATES.get(task_template, create_default_task)()]
 
         # ========== 阶段1：通达信 MCP 选股 ==========
-        phase1 = self._execute_phase1(tasks, tdx_mcp_func, trade_date)
+        phase1 = self._execute_phase1(tasks, tdx_mcp_func, trade_date, selection_channel, period_days)
         sel_logger.mcp_call_end(
             phase1.data.get("total_count", 0) if phase1.data else 0,
             phase1.execution_time * 1000
@@ -141,11 +144,68 @@ class StockSelectorService:
     def _execute_phase1(
         self, tasks: List[SelectionTask], tdx_mcp_func: Optional[Callable],
         trade_date: Optional[str] = None,
+        selection_channel: Optional[str] = None,
+        period_days: int = 100,
     ) -> PhaseResult:
         """执行阶段1：通达信 MCP 选股（支持降级到本地数据）"""
         phase_start = time.time()
+        channel = (selection_channel or os.getenv("DEFAULT_SELECTION_CHANNEL", "")).strip().lower()
         enable_fallback = os.getenv("ENABLE_LOCAL_FALLBACK", "true").lower() == "true"
         force_fallback = False
+
+        if channel == "local_tushare":
+            logger.info("========== 阶段1：本地日线 + Tushare竞价选股 ==========")
+            result = PhaseResult(phase_name="选股", source="tdx_local_tushare")
+            try:
+                use_date = trade_date or self._get_trade_date()
+                selection_result = DefaultLocalTushareSelectorService().select(
+                    trade_date=use_date,
+                    max_circ_mv=2000,
+                    max_close_price=500,
+                    min_limit_up_count=3,
+                    period_days=period_days,
+                    data_collector=self.collector,
+                )
+                result.data = selection_result
+                result.success = True
+                result.execution_time = time.time() - phase_start
+                logger.info(
+                    "阶段1完成(本地+Tushare)：选出 %s 只股票",
+                    selection_result.get("total_count", 0),
+                )
+            except Exception as e:
+                result.success = False
+                result.error = str(e)
+                result.execution_time = time.time() - phase_start
+                logger.error(f"本地+Tushare选股失败: {e}", exc_info=True)
+            return result
+
+        if channel == "db_tushare":
+            logger.info("========== 阶段1：数据库日线 + 实时Tushare竞价选股 ==========")
+            result = PhaseResult(phase_name="选股", source="stock_daily_tushare")
+            try:
+                use_date = trade_date or self._get_trade_date()
+                selection_result = DefaultDbTushareSelectorService().select(
+                    trade_date=use_date,
+                    max_circ_mv=2000,
+                    max_close_price=500,
+                    min_limit_up_count=3,
+                    period_days=period_days,
+                    data_collector=self.collector,
+                )
+                result.data = selection_result
+                result.success = True
+                result.execution_time = time.time() - phase_start
+                logger.info(
+                    "阶段1完成(数据库日线+实时竞价)：选出 %s 只股票",
+                    selection_result.get("total_count", 0),
+                )
+            except Exception as e:
+                result.success = False
+                result.error = str(e)
+                result.execution_time = time.time() - phase_start
+                logger.error(f"数据库日线+实时竞价选股失败: {e}", exc_info=True)
+            return result
 
         # ─── 优先尝试 MCP ───
         if tdx_mcp_func is not None:
@@ -218,7 +278,7 @@ class StockSelectorService:
                 max_circ_mv=2000,
                 max_close_price=500,
                 min_limit_up_count=3,
-                period_days=100,
+                period_days=period_days,
                 data_collector=self.collector,
             )
             result.data = selection_result
@@ -257,8 +317,12 @@ class StockSelectorService:
 
             # 获取每日指标
             try:
-                daily_basic = self.collector.get_daily_basic(
-                    trade_date=trade_date
+                calendar_set = self.collector.get_trading_calendar()
+                daily_basic = get_daily_basic_with_previous_fallback(
+                    self.collector,
+                    trade_date,
+                    calendar=calendar_set,
+                    purpose="阶段2补充分析",
                 )
                 # 过滤出需要的股票
                 if not daily_basic.empty:
@@ -286,6 +350,8 @@ class StockSelectorService:
                         ts_code = row.ts_code
                         if ts_code not in analysis_data:
                             analysis_data[ts_code] = {}
+                        if getattr(row, "name", None):
+                            analysis_data[ts_code]["name"] = row.name
                         analysis_data[ts_code]["industry"] = row.industry
             except Exception as e:
                 logger.warning(f"获取行业数据失败: {e}")
@@ -299,8 +365,17 @@ class StockSelectorService:
                 if prev_date is None:
                     logger.warning("无法获取前一交易日，跳过昨涨幅/开涨幅计算")
                 else:
-                    # 1. 用内网通达信行情API获取今日实时数据（open + pre_close），单个查询
-                    realtime = self.collector.get_realtime_quotes(ts_codes)
+                    # 1. 用内网通达信行情API兜底今日实时数据；MCP已返回价格字段时不重复请求
+                    realtime_ts_codes = [
+                        stock.ts_code
+                        for stock in phase1_stocks
+                        if (
+                            getattr(stock, "close", None) is None
+                            or getattr(stock, "change_pct", None) is None
+                            or getattr(stock, "open_change_pct", None) is None
+                        )
+                    ]
+                    realtime = self.collector.get_realtime_quotes(realtime_ts_codes) if realtime_ts_codes else {}
 
                     # 2. 用daily批量获取前一交易日数据（pct_chg = 昨涨幅，open = 降级用）
                     fresh = self.collector._get_pro()
@@ -336,7 +411,7 @@ class StockSelectorService:
                                 analysis_data[ts_code]["open_change_pct"] = (rt_open - rt_pre_close) / rt_pre_close * 100
                             if cur_close is not None:
                                 analysis_data[ts_code]["close"] = cur_close
-                            if analysis_data[ts_code].get("change_pct") is None and rt_open is not None and rt_pre_close is not None and rt_pre_close > 0:
+                            if analysis_data[ts_code].get("change_pct") is None and cur_close is not None and rt_pre_close is not None and rt_pre_close > 0:
                                 analysis_data[ts_code]["change_pct"] = (cur_close - rt_pre_close) / rt_pre_close * 100 if cur_close is not None else None
                         elif prev_ok:
                             # 实时数据不可用时降级：用前日开盘/收盘近似
@@ -379,6 +454,24 @@ class StockSelectorService:
                 result.success = True
                 result.execution_time = time.time() - phase_start
                 return result
+
+            precomputed = {}
+            if phase1_data.get("source") == "stock_daily_tushare":
+                for stock in phase1_stocks:
+                    extra = getattr(stock, "extra_data", {}) or {}
+                    if extra.get("seal_rate") is not None:
+                        precomputed[stock.ts_code] = {
+                            "touch_days": extra.get("touch_days", 0),
+                            "limit_up_days": extra.get("limit_up_days", 0),
+                            "seal_rate": extra.get("seal_rate"),
+                        }
+                if len(precomputed) == len(phase1_stocks):
+                    result.source = "stock_daily_data"
+                    result.data = {"seal_rates": precomputed, "min_seal_rate": min_seal_rate}
+                    result.success = True
+                    result.execution_time = time.time() - phase_start
+                    logger.info(f"阶段3完成：复用数据库日线通道已计算封板率 {len(precomputed)} 只")
+                    return result
 
             ts_codes = [s.ts_code for s in phase1_stocks]
             seal_rates = {}
@@ -503,6 +596,9 @@ class StockSelectorService:
             seal_rates=seal_rates,
         )
 
+        def _is_missing(value: Any) -> bool:
+            return value is None or value == ""
+
         merged = []
         for stock in phase1_stocks:
             ts_code = stock.ts_code
@@ -522,6 +618,10 @@ class StockSelectorService:
                 "industry": stock.industry,
                 "concept": stock.concept,
             }
+            if getattr(stock, "extra_data", None):
+                extra = stock.extra_data or {}
+                if stock_data.get("circ_mv") is None and extra.get("circ_mv") is not None:
+                    stock_data["circ_mv"] = extra.get("circ_mv")
 
             local_fallback = local_fallback_metrics.get(ts_code, {})
             if stock_data.get("limit_up_count") is None and local_fallback.get("limit_up_count") is not None:
@@ -532,11 +632,14 @@ class StockSelectorService:
             # 添加阶段2数据
             if ts_code in analysis:
                 p2 = analysis[ts_code]
-                for key in ("pre_change_pct", "open_change_pct", "industry", "concept"):
-                    if p2.get(key) is not None:
+                for key in ("name", "close", "change_pct", "pre_change_pct", "open_change_pct", "industry", "concept"):
+                    if p2.get(key) is not None and _is_missing(stock_data.get(key)):
                         stock_data[key] = p2[key]
+                if p2.get("close") is not None and _is_missing(stock_data.get("close_price")):
+                    stock_data["close_price"] = p2["close"]
 
-                stock_data["circ_mv"] = p2.get("circ_mv", 0) / 10000 if p2.get("circ_mv") else stock_data.get("circ_mv")
+                if p2.get("circ_mv") and _is_missing(stock_data.get("circ_mv")):
+                    stock_data["circ_mv"] = p2.get("circ_mv", 0) / 10000
 
             # 添加阶段3数据
             if ts_code in seal_rates:
@@ -599,19 +702,10 @@ class StockSelectorService:
         except Exception as e:
             logger.warning(f"LightGBM预测失败: {e}")
 
-        # 龙头主升 T+0 成功率模型预测
-        try:
-            merged = batch_predict_leader_main_t0(merged)
-        except Exception as e:
-            logger.warning(f"龙头主升T+0模型预测失败: {e}")
-            for s in merged:
-                s["t0_limit_success_prob"] = None
-
-        # 综合评分: rule_score(55%) + model_score(35%) + t0_prob(10%)
+        # 综合评分: rule_score + active_auction_lgbm，旧 T0 参考模型已移除。
         for s in merged:
             rule_score = s.get("rule_score", 0) or 0
             model_score = s.get("model_score")
-            t0_prob = s.get("t0_limit_success_prob")
             weights = 0
             total = 0.0
             total += rule_score * 0.55
@@ -619,9 +713,6 @@ class StockSelectorService:
             if model_score is not None:
                 total += model_score * 0.35
                 weights += 0.35
-            if t0_prob is not None:
-                total += t0_prob * 0.10
-                weights += 0.10
             s["final_score"] = round(total / weights, 2) if weights > 0 else 0
 
         return merged
@@ -789,19 +880,21 @@ class StockSelectorService:
                     # 评分字段
                     rule_score=stock.get("rule_score"),
                     model_score=stock.get("model_score"),
-                    t0_limit_success_prob=stock.get("t0_limit_success_prob"),
                     final_score=stock.get("final_score"),
                     score_level=stock.get("score_level"),
                     score_breakdown=_json.dumps(stock.get("score_breakdown", {}), ensure_ascii=False) if stock.get("score_breakdown") else None,
                     reasons="; ".join(stock.get("reasons", [])) if stock.get("reasons") else None,
                     risk_tags=_json.dumps(stock.get("risk_tags", []), ensure_ascii=False) if stock.get("risk_tags") else None,
                     next_day_plan=_json.dumps(stock.get("next_day_plan", {}), ensure_ascii=False) if stock.get("next_day_plan") else None,
-                    t0_limit_success_model_version=stock.get("t0_limit_success_prob_model_version"),
                 )
                 db.add(selected_stock)
 
             db.commit()
             logger.info(f"选股结果已保存，记录ID: {record.id}")
+            try:
+                _trigger_default_auction_relay_prediction_refresh(record.id)
+            except Exception as e:
+                logger.warning(f"默认竞价接力预测刷新触发失败（不影响主流程）: {e}")
             return record.id
         except Exception as e:
             db.rollback()
@@ -942,6 +1035,7 @@ def select_stocks(
     min_seal_rate: Optional[float] = None,
     period_days: int = 100,
     min_open_change_pct: Optional[float] = -3.0,
+    selection_channel: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     主选股函数（三阶段）
@@ -954,7 +1048,8 @@ def select_stocks(
         tdx_mcp_func=tdx_mcp_func,
         min_seal_rate=min_seal_rate,
         period_days=period_days,
-        min_open_change_pct=min_open_change_pct
+        min_open_change_pct=min_open_change_pct,
+        selection_channel=selection_channel,
     )
 
     if save_result:
@@ -1035,6 +1130,33 @@ def _trigger_dc_board_preheat(stocks: List[Dict], trade_date: str):
     logger.info(f"[预热] 后台启动 {len(stocks)} 只股票的东财板块关系刷新")
     pool = ThreadPoolExecutor(max_workers=1)
     pool.submit(_warm_all)
+    pool.shutdown(wait=False)
+
+
+def _trigger_default_auction_relay_prediction_refresh(record_id: int):
+    """后台刷新默认竞价接力三目标预测，失败不影响选股保存。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from backend.services.model_engine.model_management_service import (
+        DEFAULT_AUCTION_RELAY_MODEL_NAME,
+        refresh_record_predictions,
+    )
+
+    def _refresh():
+        db = SessionLocal()
+        try:
+            result = refresh_record_predictions(db, DEFAULT_AUCTION_RELAY_MODEL_NAME, record_id)
+            logger.info(
+                f"[默认竞价接力] 预测刷新完成: record_id={record_id}, "
+                f"updated={result.get('updated_count', 0)}, failed={len(result.get('failed', []))}"
+            )
+        except Exception as e:
+            logger.warning(f"[默认竞价接力] 预测刷新失败 record_id={record_id}: {e}")
+        finally:
+            db.close()
+
+    logger.info(f"[默认竞价接力] 后台启动预测刷新: record_id={record_id}")
+    pool = ThreadPoolExecutor(max_workers=1)
+    pool.submit(_refresh)
     pool.shutdown(wait=False)
 
 

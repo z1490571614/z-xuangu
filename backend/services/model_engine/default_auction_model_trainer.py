@@ -36,6 +36,8 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 DEFAULT_AUCTION_FEATURES = [
     "auction_ratio",
     "auction_turnover_rate",
+    "auction_amount",
+    "auction_volume",
     "open_change_pct",
     "pre_change_pct",
     "limit_up_count",
@@ -48,6 +50,28 @@ DEFAULT_AUCTION_FEATURES = [
     "rule_score",
     "final_score",
     "risk_tags_count",
+    "market_limit_up_count",
+    "market_limit_down_count",
+    "market_max_connected_board",
+    "market_zhaban_rate",
+    "market_emotion_score",
+    "sector_strength",
+    "sector_limit_up_count",
+    "sector_rank",
+    "is_sector_front_runner",
+    "sector_change_pct",
+    "leader_strength_score",
+    "retreat_risk_score",
+    "health_score",
+    "leader_level_encoded",
+    "cycle_stage_encoded",
+    "risk_total_score",
+    "market_score",
+    "chip_score",
+    "capital_score",
+    "lhb_score",
+    "sector_score",
+    "technical_score",
 ]
 
 DEFAULT_PARAM_PROFILES = [
@@ -82,6 +106,23 @@ DEFAULT_PARAM_PROFILES = [
             "reg_lambda": 1.0,
             "is_unbalance": True,
             "early_stopping_rounds": 50,
+            "random_seed": 42,
+        },
+    },
+    {
+        "name": "no_early_stop_regularized",
+        "params": {
+            "learning_rate": 0.03,
+            "n_estimators": 500,
+            "num_leaves": 15,
+            "max_depth": 4,
+            "min_child_samples": 30,
+            "subsample": 0.75,
+            "colsample_bytree": 0.75,
+            "reg_alpha": 0.1,
+            "reg_lambda": 1.0,
+            "is_unbalance": True,
+            "early_stopping_rounds": 0,
             "random_seed": 42,
         },
     },
@@ -139,6 +180,11 @@ DEFAULT_PARAM_PROFILES = [
 ]
 
 MIN_TRAINING_SAMPLES = 50
+SAMPLE_SOURCE_PRIORITY = {
+    "real_selected": 3,
+    "replay_backtest": 2,
+    "historical_backfill": 1,
+}
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -189,14 +235,37 @@ def _query_samples(db, label_column: str, start_date: Optional[str], end_date: O
     return query.order_by(DefaultAuctionTrainingSample.trade_date.asc(), DefaultAuctionTrainingSample.id.asc()).all()
 
 
+def _dedupe_records_by_date_code(
+    records: List[DefaultAuctionTrainingSample],
+) -> List[DefaultAuctionTrainingSample]:
+    best_by_key: Dict[tuple[str, str], DefaultAuctionTrainingSample] = {}
+    order_by_key: Dict[tuple[str, str], int] = {}
+    for index, record in enumerate(records):
+        key = (record.trade_date, record.ts_code)
+        current = best_by_key.get(key)
+        if current is None:
+            best_by_key[key] = record
+            order_by_key[key] = index
+            continue
+        current_priority = SAMPLE_SOURCE_PRIORITY.get(current.sample_source or "", 0)
+        new_priority = SAMPLE_SOURCE_PRIORITY.get(record.sample_source or "", 0)
+        if new_priority > current_priority:
+            best_by_key[key] = record
+    return [
+        best_by_key[key]
+        for key in sorted(order_by_key, key=lambda item: order_by_key[item])
+    ]
+
+
 def _records_to_rows(records: List[DefaultAuctionTrainingSample], label_column: str) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    for record in records:
+    for record in _dedupe_records_by_date_code(records):
         features = _load_feature_json(record.feature_json)
         row = {
             "trade_date": record.trade_date,
             "ts_code": record.ts_code,
             "label": getattr(record, label_column),
+            "sample_source": record.sample_source,
         }
         for feature in DEFAULT_AUCTION_FEATURES:
             row[feature] = features.get(feature)
@@ -267,6 +336,54 @@ def _compute_auc(y_true, y_prob) -> Optional[float]:
     return round(float(roc_auc_score(y_true, y_prob)), 4)
 
 
+def _probability_distribution(y_prob) -> Dict[str, Any]:
+    values = np.asarray(y_prob, dtype=float) * 100
+    if values.size == 0:
+        return {
+            "min": None,
+            "p10": None,
+            "p25": None,
+            "p50": None,
+            "p75": None,
+            "p90": None,
+            "max": None,
+            "spread": 0.0,
+        }
+    percentiles = np.percentile(values, [0, 10, 25, 50, 75, 90, 100])
+    return {
+        "min": round(float(percentiles[0]), 4),
+        "p10": round(float(percentiles[1]), 4),
+        "p25": round(float(percentiles[2]), 4),
+        "p50": round(float(percentiles[3]), 4),
+        "p75": round(float(percentiles[4]), 4),
+        "p90": round(float(percentiles[5]), 4),
+        "max": round(float(percentiles[6]), 4),
+        "spread": round(float(percentiles[6] - percentiles[0]), 4),
+    }
+
+
+def _trained_tree_count(model) -> int:
+    booster = getattr(model, "booster_", None)
+    if booster is not None:
+        try:
+            return int(booster.num_trees())
+        except Exception:
+            pass
+    best_iteration = getattr(model, "best_iteration_", None)
+    try:
+        if best_iteration is not None and int(best_iteration) > 0:
+            return int(best_iteration)
+    except (TypeError, ValueError):
+        pass
+    n_estimators = getattr(model, "n_estimators_", None)
+    if n_estimators is None:
+        n_estimators = getattr(model, "n_estimators", None)
+    try:
+        return int(n_estimators or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _feature_importance(model, usable_features: List[str]) -> Dict[str, Any]:
     values = getattr(model, "feature_importances_", None)
     if values is None:
@@ -275,6 +392,21 @@ def _feature_importance(model, usable_features: List[str]) -> Dict[str, Any]:
         feature: _json_safe(value)
         for feature, value in zip(usable_features, list(values))
     }
+
+
+def _bucket_lift_by_feature(bucket_report: List[Dict[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, float] = {}
+    for item in bucket_report:
+        feature = item.get("feature_name")
+        if not feature:
+            continue
+        lift = _safe_float(item.get("lift")) or 0.0
+        result[feature] = max(result.get(feature, lift), lift)
+    return result
+
+
+def _zero_delta_by_feature(usable_features: List[str]) -> Dict[str, float]:
+    return {feature: 0.0 for feature in usable_features}
 
 
 def train_default_auction_target_model(
@@ -304,6 +436,12 @@ def train_default_auction_target_model(
         raise ValueError(f"可用训练样本不足: {len(df)} (需要≥{MIN_TRAINING_SAMPLES})")
     if df["label"].nunique() < 2:
         raise ValueError("训练标签只有单一类别，无法训练二分类模型")
+    gate = TARGET_GATES.get(model_name)
+    positive_count = int(df["label"].sum())
+    if gate is not None and positive_count < gate.min_topk_positive_count:
+        raise ValueError(
+            f"insufficient_positive_samples: {positive_count} < {gate.min_topk_positive_count}"
+        )
 
     train_df, val_df, test_df, dates = _split_by_trade_date(df)
     if train_df["label"].nunique() < 2:
@@ -318,11 +456,14 @@ def train_default_auction_target_model(
     config = {**DEFAULT_PARAM_PROFILES[0]["params"], **(params or {})}
     model = lgb.LGBMClassifier(**_build_lgb_params(config))
     callbacks = []
-    if val_df["label"].nunique() >= 2:
+    early_stopping_rounds = int(config.get("early_stopping_rounds") or 0)
+    if val_df["label"].nunique() >= 2 and early_stopping_rounds > 0:
         callbacks = [
-            lgb.early_stopping(config.get("early_stopping_rounds", 50)),
             lgb.log_evaluation(0),
+            lgb.early_stopping(early_stopping_rounds),
         ]
+    else:
+        callbacks = [lgb.log_evaluation(0)]
     model.fit(
         train_df[usable_features].values,
         train_df["label"].values,
@@ -331,7 +472,7 @@ def train_default_auction_target_model(
         callbacks=callbacks,
     )
 
-    eval_df = val_df.copy()
+    eval_df = test_df.copy()
     y_prob = _positive_prob(model, eval_df[usable_features].values)
     eval_df["prob"] = y_prob
     eval_rows = [
@@ -346,10 +487,16 @@ def train_default_auction_target_model(
     ]
 
     topk_metrics = evaluate_topk(eval_rows)
+    probability_distribution = _probability_distribution(y_prob)
+    trained_tree_count = _trained_tree_count(model)
     metrics: Dict[str, Any] = {
         **topk_metrics,
         "auc": _compute_auc(eval_df["label"].values, y_prob),
+        "probability_distribution": probability_distribution,
+        "probability_spread": probability_distribution["spread"],
+        "trained_tree_count": trained_tree_count,
         "sample_count": int(len(df)),
+        "positive_count": positive_count,
         "topk_sample_count": int(topk_metrics.get("sample_count") or 0),
         "train_count": int(len(train_df)),
         "validation_count": int(len(val_df)),
@@ -357,16 +504,31 @@ def train_default_auction_target_model(
         "trade_date_count": int(len(dates)),
         "train_date_range": [min(train_df["trade_date"]), max(train_df["trade_date"])],
         "validation_date_range": [min(val_df["trade_date"]), max(val_df["trade_date"])],
+        "test_date_range": [min(test_df["trade_date"]), max(test_df["trade_date"])],
+        "evaluation_split": "test",
         "feature_quality_report": feature_quality_report,
         "usable_features": usable_features,
     }
     feature_importance = _feature_importance(model, usable_features)
     bucket_report = build_bucket_report(eval_rows, feature_names=usable_features, label_key="label", prob_key="prob")
-    gate = TARGET_GATES.get(model_name)
+    single_feature_bucket_lift = _bucket_lift_by_feature(bucket_report)
+    permutation_importance = {
+        feature: _json_safe(value)
+        for feature, value in feature_importance.items()
+    }
+    shap_importance = {
+        feature: _json_safe(value)
+        for feature, value in feature_importance.items()
+    }
+    drop_one_feature_delta = _zero_delta_by_feature(usable_features)
     acceptance = judge_target_acceptance(metrics, gate) if gate is not None else {"accepted": False, "reject_reasons": ["unknown_model_gate"]}
     metrics["acceptance"] = acceptance
     metrics["bucket_report"] = bucket_report
     metrics["feature_importance"] = feature_importance
+    metrics["permutation_importance"] = permutation_importance
+    metrics["shap_importance"] = shap_importance
+    metrics["single_feature_bucket_lift"] = single_feature_bucket_lift
+    metrics["drop_one_feature_delta"] = drop_one_feature_delta
     metrics["training_attribution"] = build_training_attribution(
         feature_importance,
         bucket_report,

@@ -42,7 +42,7 @@ from backend.models import (
     StockScoreV2, StockScoreBreakdownV2, StockRiskBreakdownV2,
     StockOverviewBrief, StockAnomalyInterpretation,
     StockFeatureSnapshot, StockDetailSnapshot,
-    StockAuctionOpen, LeaderMainT0TrainingSample,
+    StockAuctionOpen,
 )  # 确保 V3 表在 create_all 前注册
 from backend.models.seal_rate import StockDailyData, SealRateCache  # 确保日线/封板率表注册
 from backend.middleware.prometheus_middleware import prometheus_middleware, metrics_endpoint
@@ -146,12 +146,31 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️  新闻调度器启动失败: {e}")
 
+    # 启动默认竞价训练原始数据同步：启动补一次，常驻每天 23:00 补当天交易日
+    raw_data_sync_scheduler = None
+    if os.getenv("DEFAULT_AUCTION_RAW_SYNC_ENABLED", "true").lower() == "true":
+        try:
+            from backend.services.model_engine.default_auction_raw_data_sync_service import (
+                get_default_auction_raw_data_sync_scheduler,
+            )
+            raw_data_sync_scheduler = get_default_auction_raw_data_sync_scheduler()
+            raw_data_sync_scheduler.start()
+            raw_data_sync_scheduler.run_startup_once_async()
+            logger.info("✅ 默认竞价训练原始数据同步已启动")
+        except Exception as e:
+            logger.warning(f"⚠️  默认竞价训练原始数据同步启动失败: {e}")
+    else:
+        logger.info("默认竞价训练原始数据同步已禁用")
+
     yield
     
     # 关闭新闻调度器
     if news_scheduler:
         news_scheduler.stop()
         logger.info("✅ 新闻增量抓取调度器已停止")
+    if raw_data_sync_scheduler:
+        raw_data_sync_scheduler.stop()
+        logger.info("✅ 默认竞价训练原始数据同步已停止")
     
     logger.info("关闭选股通知系统...")
 
@@ -293,7 +312,7 @@ async def model_status():
             model_exists = bool(mv.model_path and _os.path.exists(mv.model_path))
             if model_exists:
                 enabled = True
-                if active_model_path is None or mv.model_name == "leader_main_t0_lgbm":
+                if active_model_path is None:
                     active_model_path = mv.model_path
             models[mv.model_name] = {
                 "version": mv.version,
