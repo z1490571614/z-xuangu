@@ -154,7 +154,7 @@ async function executeWithStrategy() {
 
     console.log('准备调用API...')
     // 调用API执行选股
-    const res = await axios.post('/api/v1/stock/select-db-tushare', {
+    const res = await axios.post('/api/v1/stock/select', {
       trade_date: props.tradeDate,
       strategy_id: selectedId.value,
       min_seal_rate: selectedStrategy?.conditions_config?.limit_up?.min_seal_rate,
