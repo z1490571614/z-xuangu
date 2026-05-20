@@ -627,6 +627,7 @@ function getPctClass(v) {
 
 /* Section 样式 */
 .section { margin-top: 24px; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+.preview-section { width: fit-content; max-width: none; }
 .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #f0f0f0; }
 .section-header h3 { margin: 0; font-size: 16px; color: #262626; font-weight: 600; }
 .stock-count { font-size: 13px; color: #999; background: #fafafa; padding: 4px 12px; border-radius: 12px; }
@@ -648,11 +649,11 @@ function getPctClass(v) {
 .model-guide-item span { color: #6b7280; font-size: 12px; line-height: 1.45; }
 
 /* 表格容器 */
-.table-wrapper { overflow-x: auto; border-radius: 8px; border: 1px solid #f0f0f0; }
+.table-wrapper { overflow-x: visible; border-radius: 8px; border: 1px solid #f0f0f0; }
 
 /* 增强型表格 */
 .enhanced-table {
-  width: 100%;
+  width: max-content;
   border-collapse: collapse;
   font-size: 12.5px;
   white-space: nowrap;
@@ -660,7 +661,7 @@ function getPctClass(v) {
 .enhanced-table th {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
-  padding: 10px 8px;
+  padding: 9px 7px;
   text-align: center;
   font-weight: 600;
   font-size: 11.5px;
@@ -670,7 +671,7 @@ function getPctClass(v) {
   z-index: 10;
 }
 .enhanced-table td {
-  padding: 8px 6px;
+  padding: 7px 5px;
   text-align: center;
   border-bottom: 1px solid #f5f5f5;
   vertical-align: middle;

@@ -12,13 +12,16 @@
       </nav>
     </header>
 
-    <main class="main-content">
+    <main :class="['main-content', { 'main-content-wide': route.path === '/' }]">
       <router-view></router-view>
     </main>
   </div>
 </template>
 
 <script setup>
+import { useRoute } from 'vue-router'
+
+const route = useRoute()
 </script>
 
 <style>
@@ -80,7 +83,12 @@ body {
 
 .main-content {
   max-width: 1200px;
+  width: 100%;
   margin: 0 auto;
   padding: 24px;
+}
+
+.main-content-wide {
+  max-width: none;
 }
 </style>
