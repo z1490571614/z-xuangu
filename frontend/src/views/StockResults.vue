@@ -88,10 +88,6 @@
 
       <div class="model-guide">
         <div class="model-guide-item">
-          <strong>旧T0参考</strong>
-          <span>早期模型输出，仅作为历史兼容参考，不参与默认接力分。</span>
-        </div>
-        <div class="model-guide-item">
           <strong>当日涨停</strong>
           <span>目标一，衡量竞价后当天继续冲击涨停的概率。</span>
         </div>
@@ -132,12 +128,6 @@
               <th @click="sortBy('health_score')" class="sortable">
                 龙头评级
                 <span v-if="sortField === 'health_score'" class="sort-icon">
-                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
-                </span>
-              </th>
-              <th @click="sortBy('t0_limit_success_prob')" class="sortable lightgbm-col">
-                旧T0参考
-                <span v-if="sortField === 't0_limit_success_prob'" class="sort-icon">
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
@@ -202,10 +192,6 @@
                 <span v-if="stock.leader_level" :class="'level-tag ' + stock.leader_level">{{ stock.leader_level }}</span>
                 <span v-else class="muted">{{ stock.final_score != null ? stock.final_score.toFixed(1) : '--' }}</span>
               </td>
-              <td class="num-cell model-prob lightgbm-prob" :title="lightGbmTitle(stock)">
-                <span class="model-label">旧</span>
-                <span>{{ formatPct(stock.t0_limit_success_prob) }}</span>
-              </td>
               <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 't0')">
                 {{ formatPercentScore(stock.default_t0_limit_prob) }}
               </td>
@@ -242,7 +228,6 @@
           </tbody>
         </table>
       </div>
-      <p v-if="t0ModelDisclaimer" class="model-disclaimer">{{ t0ModelDisclaimer }}</p>
     </div>
 
     <!-- 个股详情弹窗 -->
@@ -288,8 +273,6 @@ const currentPage = ref(1)
 const pageSize = 10
 const totalRecords = ref(0)
 const currentRecordId = ref(null)
-const t0ModelDisclaimer = ref('')
-
 const sortField = ref('health_score')
 const sortOrder = ref('desc')
 
@@ -365,15 +348,12 @@ async function loadStocks(recordId) {
     const res = await axios.get(`/api/v1/stock/results/${recordId}`)
     const data = res.data?.data || {}
     stocks.value = data.stocks || []
-    t0ModelDisclaimer.value = data.t0_model_disclaimer || ''
-    
     if (stocks.value.length > 0) {
       startPreload(stocks.value)
     }
   } catch (e) {
     console.error('加载股票失败:', e)
     stocks.value = []
-    t0ModelDisclaimer.value = ''
   }
 }
 
@@ -518,11 +498,6 @@ function formatPct(v) { return v != null ? Number(v).toFixed(2) + '%' : '--' }
 function formatPercentScore(v) { return v != null ? Number(v).toFixed(1) + '%' : '--' }
 function formatScore(v) { return v != null ? Number(v).toFixed(1) : '--' }
 function formatTime(t) { if (!t) return '--'; return t.replace('T', ' ').substring(0, 19) }
-
-function lightGbmTitle(stock) {
-  const version = stock.t0_limit_success_model_version || '未启用模型'
-  return `旧T0参考模型：预测历史样本下的T+0封板概率。版本：${version}`
-}
 
 function defaultRelayTitle(stock, target) {
   const version = stock.default_relay_model_version || '未启用默认接力组合模型'
@@ -728,13 +703,8 @@ function isLimitUp(stock) {
 .num-cell.muted { color: #bbb; }
 .num-cell.highlight { color: #ff4d4f; font-weight: 700; }
 .num-cell.score-cell { color: #667eea; font-weight: 700; }
-.lightgbm-col { min-width: 88px; }
 .relay-prob-col { min-width: 110px; }
 .relay-score-col { min-width: 76px; }
-.lightgbm-prob {
-  color: #08979c;
-  font-weight: 700;
-}
 .relay-prob {
   color: #1d4ed8;
   font-weight: 700;

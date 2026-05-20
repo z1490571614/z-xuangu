@@ -2,7 +2,7 @@ from backend.database import Base, engine
 from backend.models import SelectedStock, SelectionRecord, StockAuctionOpen
 
 
-def test_selection_detail_returns_t0_model_fields(client, db):
+def test_selection_detail_returns_default_auction_model_fields(client, db):
     Base.metadata.create_all(bind=engine)
     record = SelectionRecord(trade_date="20240512", total_count=1, status="success")
     db.add(record)
@@ -14,8 +14,6 @@ def test_selection_detail_returns_t0_model_fields(client, db):
             name="测试股票",
             rule_score=80,
             final_score=80,
-            t0_limit_success_prob=72.5,
-            t0_limit_success_model_version="v1",
             default_t0_limit_prob=61.2,
             default_t1_premium_prob=52.3,
             default_t1_continue_prob=18.4,
@@ -29,16 +27,14 @@ def test_selection_detail_returns_t0_model_fields(client, db):
 
     assert resp.status_code == 200
     stock = resp.json()["data"]["stocks"][0]
-    assert stock["t0_limit_success_prob"] == 72.5
-    assert stock["t0_limit_success_model_version"] == "v1"
+    assert "t0_limit_success_prob" not in stock
+    assert "t0_limit_success_model_version" not in stock
     assert stock["default_t0_limit_prob"] == 61.2
     assert stock["default_t1_premium_prob"] == 52.3
     assert stock["default_t1_continue_prob"] == 18.4
     assert stock["default_relay_score"] == 39.8
     assert stock["default_relay_model_version"] == "t0_v1|premium_v1|continue_v1"
-    disclaimer = resp.json()["data"]["t0_model_disclaimer"]
-    assert "仅作排序参考" in disclaimer
-    assert "不构成投资建议" in disclaimer
+    assert "t0_model_disclaimer" not in resp.json()["data"]
 
 
 def test_selection_detail_does_not_fill_mcp_auction_metrics_from_local_auction_table(client, db):

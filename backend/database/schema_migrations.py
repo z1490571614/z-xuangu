@@ -20,8 +20,6 @@ def ensure_runtime_columns(engine) -> None:
             "pre_close": "FLOAT",
         },
         "selected_stock": {
-            "t0_limit_success_prob": "NUMERIC(5, 2)",
-            "t0_limit_success_model_version": "VARCHAR(50)",
             "default_t0_limit_prob": "NUMERIC(5, 2)",
             "default_t1_premium_prob": "NUMERIC(5, 2)",
             "default_t1_continue_prob": "NUMERIC(5, 2)",
@@ -87,6 +85,13 @@ def ensure_runtime_columns(engine) -> None:
             "is_t1_one_line_limit_up": "INTEGER",
             "created_at": "DATETIME",
             "updated_at": "DATETIME",
+        },
+        "t0_simulation_backtest_run": {
+            "min_buy_prob_pct": "FLOAT NOT NULL DEFAULT 50.0",
+            "min_open_change_pct": "FLOAT NOT NULL DEFAULT -3.0",
+            "max_open_change_pct": "FLOAT NOT NULL DEFAULT 7.0",
+            "high_profit_hold_pct": "FLOAT NOT NULL DEFAULT 13.0",
+            "profit_pullback_pct": "FLOAT NOT NULL DEFAULT 5.0",
         },
     }
     inspector = inspect(engine)

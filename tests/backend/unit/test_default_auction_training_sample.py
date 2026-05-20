@@ -7,7 +7,6 @@ from backend.database import Base, engine
 from backend.database.schema_migrations import ensure_runtime_columns
 from backend.models import (
     DefaultAuctionTrainingSample,
-    LeaderMainT0TrainingSample,
     SelectionRecord,
     SelectedStock,
     StockAuctionOpen,
@@ -925,10 +924,9 @@ def test_build_samples_from_selected_record_removes_shadowed_replay_sample(db):
     ]
 
 
-def test_build_samples_from_replay_range_reuses_leader_t0_non_news_features(db):
+def test_build_samples_from_replay_range_combines_snapshot_and_daily_metrics(db):
     Base.metadata.create_all(bind=engine)
     db.query(DefaultAuctionTrainingSample).delete()
-    db.query(LeaderMainT0TrainingSample).delete()
     db.query(StockAuctionOpen).delete()
     db.query(StockFeatureSnapshot).delete()
     db.query(StockDailyData).filter(StockDailyData.ts_code == "000025.SZ").delete()
@@ -945,13 +943,13 @@ def test_build_samples_from_replay_range_reuses_leader_t0_non_news_features(db):
         )
     )
     db.add(
-        LeaderMainT0TrainingSample(
+        StockFeatureSnapshot(
             trade_date="20260508",
             ts_code="000025.SZ",
+            limit_up_count_100d=4,
+            seal_rate_100d=82,
+            rise_10d_pct=18,
             circ_mv=88.0,
-            sector_change_pct=2.5,
-            sector_limit_up_count=6,
-            rule_score=72.0,
         )
     )
     closes = [8.0, 8.8, 9.68, 9.8, 10.78, 11.86, 11.9, 13.09, 13.2, 10.0, 12.0]
@@ -992,9 +990,9 @@ def test_build_samples_from_replay_range_reuses_leader_t0_non_news_features(db):
     sample = db.query(DefaultAuctionTrainingSample).filter_by(ts_code="000025.SZ").one()
     features = json.loads(sample.feature_json)
     assert features["circ_mv"] == 88.0
-    assert features["sector_change_pct"] == 2.5
-    assert features["sector_limit_up_count"] == 6
-    assert features["rule_score"] == 72.0
+    assert features["limit_up_count"] == 5
+    assert features["seal_rate"] is not None
+    assert features["rise_10d_pct"] is not None
 
 
 def test_build_samples_from_replay_range_writes_previous_market_context(db):

@@ -5,6 +5,7 @@ import TaskManage from '../views/TaskManage.vue'
 import Settings from '../views/Settings.vue'
 import StrategyManage from '../views/StrategyManage.vue'
 import ModelCenter from '../views/ModelCenter.vue'
+import T0SimulationBacktest from '../views/T0SimulationBacktest.vue'
 
 const routes = [
   {
@@ -21,6 +22,11 @@ const routes = [
     path: '/models',
     name: 'ModelCenter',
     component: ModelCenter
+  },
+  {
+    path: '/backtest/t0-simulation',
+    name: 'T0SimulationBacktest',
+    component: T0SimulationBacktest
   },
   {
     path: '/tasks',

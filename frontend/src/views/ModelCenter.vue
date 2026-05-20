@@ -82,6 +82,14 @@
           <div>
             <h3>默认竞价接力 V2</h3>
             <p class="panel-subtitle">三目标模型验收、样本构建与组合训练</p>
+            <div class="sync-date-line">
+              <span>训练原始数据同步至</span>
+              <strong>{{ formatDate(rawDataSyncState?.synced_to_date || rawDataSyncState?.trade_date) }}</strong>
+              <em :class="['sync-status', rawDataSyncState?.status]">{{ rawDataSyncStatusText(rawDataSyncState?.status) }}</em>
+              <span v-if="rawDataSyncState?.finished_at">更新 {{ formatDateTime(rawDataSyncState.finished_at) }}</span>
+              <span v-else-if="rawDataSyncLoading">同步状态加载中</span>
+              <span v-else-if="rawDataSyncError" class="sync-error">{{ rawDataSyncError }}</span>
+            </div>
           </div>
           <span :class="['status-badge', relayCompositeReady ? 'passed' : 'rejected']">
             {{ relayCompositeReady ? '已启用' : '目标未完整' }}
@@ -123,6 +131,164 @@
         </div>
 
         <div class="relay-grid">
+          <div class="relay-card wide auto-learning-card">
+            <h4>手动自动学习</h4>
+            <div class="form-grid compact">
+              <label>
+                起始日期
+                <input v-model="autoLearning.startDate" />
+              </label>
+              <label>
+                结束日期
+                <input v-model="autoLearning.endDate" />
+              </label>
+              <label>
+                通达信目录
+                <input v-model="autoLearning.tdxVipdocPath" placeholder="默认使用后端配置" />
+              </label>
+              <label>
+                选股记录 ID
+                <input v-model="autoLearning.selectedRecordIdsText" placeholder="多个用逗号分隔" />
+              </label>
+              <label>
+                刷新记录 ID
+                <input v-model="autoLearning.refreshRecordIdsText" placeholder="多个用逗号分隔" />
+              </label>
+              <label>
+                最大重训次数
+                <input v-model.number="autoLearning.maxRetrainAttempts" type="number" min="1" />
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.syncDaily" type="checkbox" />
+                同步本地日线
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.syncMinute" type="checkbox" />
+                同步本地分钟线
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.recalculateAuctionRatios" type="checkbox" />
+                重算竞昨比
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.validateReplay" type="checkbox" />
+                回放验收
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.buildRealSamples" type="checkbox" />
+                构建真实样本
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.buildReplaySamples" type="checkbox" />
+                构建回放样本
+              </label>
+              <label class="check-row locked">
+                <input checked disabled type="checkbox" />
+                训练数据审计
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.runTraining" type="checkbox" />
+                三目标训练
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.runBacktest" type="checkbox" />
+                离线回测
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.autoActivate" type="checkbox" />
+                验收通过后启用
+              </label>
+              <label class="check-row">
+                <input v-model="autoLearning.refreshPredictions" type="checkbox" />
+                刷新最新预测
+              </label>
+              <button class="btn-primary" :disabled="autoLearning.creating || autoLearningRunning" @click="startAutoLearning">
+                {{ autoLearning.creating || autoLearningRunning ? '自动学习运行中' : '开始自动学习' }}
+              </button>
+            </div>
+
+            <div v-if="autoLearning.creating" class="state-box">自动学习运行中</div>
+            <div v-else-if="autoLearning.error" class="state-box error">
+              <span>{{ autoLearning.error }}</span>
+              <button class="btn-secondary small" @click="startAutoLearning">重试</button>
+            </div>
+            <div v-else-if="autoLearning.currentRun" class="job-panel auto-learning-run">
+              <div class="job-head">
+                <h4>运行 #{{ autoLearning.currentRun.id }}</h4>
+                <span :class="['status-badge', autoLearning.currentRun.status]">{{ autoLearningStatusText(autoLearning.currentRun.status) }}</span>
+              </div>
+              <div class="progress">
+                <div class="progress-bar" :style="{ width: `${autoLearning.currentRun.progress || 0}%` }"></div>
+              </div>
+              <div class="progress-text">
+                {{ autoLearning.currentRun.progress || 0 }}% / {{ autoLearningPhaseText(autoLearning.currentRun.phase) }}
+              </div>
+              <div class="pipeline-stage-grid">
+                <div class="pipeline-stage">
+                  <span>本地日线</span>
+                  <strong>{{ autoLearning.currentRun.stage_results?.daily_sync?.rows_synced ?? '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>分钟线</span>
+                  <strong>{{ autoLearning.currentRun.stage_results?.minute_sync?.rows_synced ?? '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>竞昨比</span>
+                  <strong>{{ autoLearning.currentRun.stage_results?.auction_ratio_recalc?.updated_count ?? '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>回放验收</span>
+                  <strong>{{ autoLearning.currentRun.stage_results?.replay_validation?.accepted === true ? '通过' : autoLearning.currentRun.stage_results?.replay_validation ? '未通过' : '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>真实样本</span>
+                  <strong>{{ autoLearning.currentRun.stage_results?.sample_build?.real?.created_count ?? '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>回放样本</span>
+                  <strong>{{ autoLearning.currentRun.stage_results?.sample_build?.replay?.created_count ?? '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>训练任务</span>
+                  <strong>{{ autoLearning.currentRun.training_job_id || '--' }}</strong>
+                </div>
+                <div class="pipeline-stage">
+                  <span>刷新记录</span>
+                  <strong>{{ autoLearning.currentRun.refreshed_record_ids?.length ?? '--' }}</strong>
+                </div>
+              </div>
+              <div v-if="autoLearning.currentRun.audit?.errors?.length" class="reason-list">
+                <span v-for="reason in autoLearning.currentRun.audit.errors" :key="reason">{{ reason }}</span>
+              </div>
+              <div v-if="autoLearning.currentRun.error_message" class="state-box error">{{ autoLearning.currentRun.error_message }}</div>
+              <div v-if="autoLearning.currentRun.activated_versions" class="target-acceptance">
+                <div v-for="(version, name) in autoLearning.currentRun.activated_versions" :key="name" class="acceptance-row">
+                  <strong>{{ modelTitle(name) }}</strong>
+                  <span>已启用 {{ formatVersion(version) }}</span>
+                </div>
+              </div>
+              <div class="button-row">
+                <button
+                  v-if="['pending', 'running'].includes(autoLearning.currentRun.status)"
+                  class="btn-secondary"
+                  @click="cancelAutoLearning(autoLearning.currentRun.id)"
+                >
+                  取消运行
+                </button>
+                <button class="btn-secondary" @click="loadAutoLearningRuns">刷新运行记录</button>
+              </div>
+            </div>
+            <div v-else-if="autoLearning.runs.length" class="result-box">
+              <div v-for="run in autoLearning.runs.slice(0, 5)" :key="run.id" class="daily-row">
+                <strong>#{{ run.id }}</strong>
+                <span>{{ autoLearningStatusText(run.status) }}</span>
+                <span>{{ autoLearningPhaseText(run.phase) }}</span>
+                <button class="btn-secondary small" @click="selectAutoLearningRun(run.id)">查看</button>
+              </div>
+            </div>
+            <div v-else class="empty-inline">暂无自动学习运行</div>
+          </div>
+
           <div class="relay-card wide">
             <h4>数据管道重建</h4>
             <div class="form-grid compact">
@@ -413,102 +579,6 @@
         <p v-if="refreshStatus" class="status-line">{{ refreshStatus }}</p>
       </section>
 
-      <section class="panel">
-        <h3>训练控制台</h3>
-        <div class="form-grid">
-          <label for="train-start">
-            训练开始日期
-            <input id="train-start" v-model="trainingForm.start_date" />
-          </label>
-          <label for="train-end">
-            训练结束日期
-            <input id="train-end" v-model="trainingForm.end_date" />
-          </label>
-          <label>
-            学习率
-            <input v-model.number="trainingForm.learning_rate" type="number" step="0.01" />
-          </label>
-          <label>
-            树数量
-            <input v-model.number="trainingForm.n_estimators" type="number" />
-          </label>
-          <label>
-            叶子数
-            <input v-model.number="trainingForm.num_leaves" type="number" />
-          </label>
-          <label>
-            胜率门槛
-            <input v-model.number="trainingForm.min_precision" type="number" step="0.01" />
-          </label>
-          <label>
-            最小命中数
-            <input v-model.number="trainingForm.min_hit_count" type="number" />
-          </label>
-          <label>
-            最大重训次数
-            <input v-model.number="trainingForm.max_retrain_attempts" type="number" />
-          </label>
-        </div>
-        <details class="advanced">
-          <summary>高级参数</summary>
-          <div class="form-grid">
-            <label>
-              最大深度
-              <input v-model.number="trainingForm.max_depth" type="number" />
-            </label>
-            <label>
-              行采样
-              <input v-model.number="trainingForm.subsample" type="number" step="0.05" />
-            </label>
-            <label>
-              列采样
-              <input v-model.number="trainingForm.colsample_bytree" type="number" step="0.05" />
-            </label>
-            <label>
-              早停轮数
-              <input v-model.number="trainingForm.early_stopping_rounds" type="number" />
-            </label>
-            <label>
-              随机种子
-              <input v-model.number="trainingForm.random_seed" type="number" />
-            </label>
-            <label class="check-row">
-              <input v-model="trainingForm.is_unbalance" type="checkbox" />
-              类别不平衡修正
-            </label>
-          </div>
-        </details>
-        <div class="button-row">
-          <button class="btn-secondary" :disabled="training" @click="startTraining('test')">测试训练</button>
-          <button class="btn-primary" :disabled="training" @click="startTraining('formal')">正式训练</button>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h3>训练任务与日志</h3>
-        <div v-if="!currentJob" class="empty-inline">暂无训练任务</div>
-        <div v-else class="job-panel">
-          <div class="job-head">
-            <h4>任务 #{{ currentJob.id || '--' }}</h4>
-            <span :class="['status-badge', currentJob.status]">{{ currentJob.status || '--' }}</span>
-          </div>
-          <div class="progress">
-            <div class="progress-bar" :style="{ width: `${currentJob.progress || 0}%` }"></div>
-          </div>
-          <div class="progress-text">{{ currentJob.progress || 0 }}%</div>
-          <div v-if="currentJob.attempts?.length" class="attempt-list">
-            <div v-for="attempt in currentJob.attempts" :key="attempt.attempt" class="attempt-row">
-              第 {{ attempt.attempt }} 次
-              <strong>{{ attempt.accepted ? '通过' : '未通过' }}</strong>
-              <span>胜率 {{ fmtPct01(attempt.precision) }}</span>
-              <span>命中 {{ attempt.hit_count || 0 }}</span>
-            </div>
-          </div>
-          <div class="log-list">
-            <div v-for="(log, idx) in currentJob.logs || []" :key="idx">{{ log.message }}</div>
-          </div>
-        </div>
-      </section>
     </template>
   </div>
 </template>
@@ -522,15 +592,16 @@ const route = useRoute()
 const loading = ref(false)
 const error = ref('')
 const models = ref({})
-const selectedModel = ref('leader_main_t0_lgbm')
+const rawDataSyncState = ref(null)
+const rawDataSyncLoading = ref(false)
+const rawDataSyncError = ref('')
+const selectedModel = ref('default_auction_t0_limit_lgbm')
 const selectedVersion = ref('')
 const activateStatus = ref('')
 const activating = ref(false)
 const refreshRecordId = ref('')
 const refreshStatus = ref('')
 const refreshing = ref(false)
-const training = ref(false)
-const currentJob = ref(null)
 const modelNames = computed(() => Object.keys(models.value))
 const expandedVersions = ref({})
 const DEFAULT_AUCTION_RELAY_MODEL = 'default_auction_relay_v2'
@@ -544,7 +615,6 @@ const MODEL_DISPLAY_ORDER = [
   'default_auction_t0_limit_lgbm',
   'default_auction_t1_premium_lgbm',
   'default_auction_t1_continue_lgbm',
-  'leader_main_t0_lgbm',
 ]
 const MODEL_META = {
   default_auction_relay_v2: {
@@ -566,11 +636,6 @@ const MODEL_META = {
     title: '次日连板模型',
     description: '判断入选股次日是否有继续涨停或连板的概率。',
     role: '预测T+1连板',
-  },
-  leader_main_t0_lgbm: {
-    title: '龙头T0辅助模型',
-    description: '旧版T0成功率模型，主要作为龙头战法和历史兼容参考。',
-    role: '旧T0参考',
   },
   active_auction_lgbm: {
     title: '竞价旧模型',
@@ -618,9 +683,33 @@ const relay = ref({
   jobId: null,
 })
 
+const autoLearning = ref({
+  creating: false,
+  error: '',
+  currentRun: null,
+  runs: [],
+  startDate: '20250116',
+  endDate: '',
+  tdxVipdocPath: '',
+  selectedRecordIdsText: '',
+  refreshRecordIdsText: '',
+  syncDaily: true,
+  syncMinute: true,
+  recalculateAuctionRatios: true,
+  validateReplay: true,
+  buildRealSamples: true,
+  buildReplaySamples: true,
+  runTraining: true,
+  runBacktest: true,
+  autoActivate: true,
+  refreshPredictions: true,
+  maxRetrainAttempts: 5,
+})
+
 const relayModel = computed(() => models.value[DEFAULT_AUCTION_RELAY_MODEL] || {})
 const relayCompositeReady = computed(() => Boolean(relayModel.value.active_version))
 const selectedModelIsComposite = computed(() => isCompositeModel(selectedModel.value))
+const autoLearningRunning = computed(() => ['pending', 'running'].includes(autoLearning.value.currentRun?.status))
 const relayCompositeTargets = computed(() => {
   const targets = relayModel.value.target_models
   if (!Array.isArray(targets) || targets.length === 0) return DEFAULT_AUCTION_TARGETS
@@ -640,27 +729,9 @@ const relayTargetStatuses = computed(() => DEFAULT_AUCTION_TARGETS.map(name => {
 }))
 const relayValidationDays = computed(() => relay.value.validation?.daily || relay.value.validation?.days || [])
 
-const trainingForm = ref({
-  start_date: '20250101',
-  end_date: '',
-  learning_rate: 0.05,
-  n_estimators: 500,
-  num_leaves: 31,
-  threshold: 0.5,
-  min_precision: 0.5,
-  min_hit_count: 30,
-  max_retrain_attempts: 3,
-  is_unbalance: true,
-  max_depth: -1,
-  subsample: 0.8,
-  colsample_bytree: 0.8,
-  early_stopping_rounds: 50,
-  random_seed: 42,
-})
-
 let ws = null
-let pollTimer = null
 let relayPollTimer = null
+let autoLearningPollTimer = null
 
 watch(modelNames, names => {
   if (names.length && !names.includes(selectedModel.value)) selectedModel.value = names[0]
@@ -674,16 +745,17 @@ onMounted(() => {
   if (route.query.record_id) refreshRecordId.value = String(route.query.record_id)
   const today = new Date()
   const todayText = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
-  trainingForm.value.end_date = todayText
   relay.value.endDate = todayText
+  autoLearning.value.endDate = todayText
   loadModels()
+  loadAutoLearningRuns()
   connectModelWS()
 })
 
 onUnmounted(() => {
   if (ws) ws.close()
-  if (pollTimer) clearTimeout(pollTimer)
   if (relayPollTimer) clearTimeout(relayPollTimer)
+  if (autoLearningPollTimer) clearTimeout(autoLearningPollTimer)
 })
 
 async function loadModels() {
@@ -692,10 +764,24 @@ async function loadModels() {
   try {
     const res = await axios.get('/api/v1/models')
     models.value = res.data?.data?.models || {}
+    await loadRawDataSyncState()
   } catch (e) {
     error.value = '模型状态加载失败：' + (e.response?.data?.detail || e.message)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadRawDataSyncState() {
+  rawDataSyncLoading.value = true
+  rawDataSyncError.value = ''
+  try {
+    const res = await axios.get('/api/v1/models/default-auction-relay/raw-data-sync-state')
+    rawDataSyncState.value = res.data?.data || null
+  } catch (e) {
+    rawDataSyncError.value = e.response?.data?.detail || e.message || '加载失败'
+  } finally {
+    rawDataSyncLoading.value = false
   }
 }
 
@@ -800,6 +886,103 @@ async function rebuildRelayPipeline() {
   }
 }
 
+function parseIdList(text) {
+  const values = String(text || '')
+    .split(',')
+    .map(item => Number(item.trim()))
+    .filter(item => Number.isInteger(item) && item > 0)
+  return values.length ? values : null
+}
+
+async function loadAutoLearningRuns() {
+  try {
+    const res = await axios.get('/api/v1/models/default-auction-relay/auto-learning/runs?limit=20')
+    autoLearning.value.runs = res.data?.data || []
+    if (!autoLearning.value.currentRun && autoLearning.value.runs.length) {
+      autoLearning.value.currentRun = autoLearning.value.runs[0]
+    }
+  } catch (e) {
+    autoLearning.value.error = '自动学习运行记录加载失败：' + (e.response?.data?.detail || e.message)
+  }
+}
+
+async function startAutoLearning() {
+  autoLearning.value.creating = true
+  autoLearning.value.error = ''
+  try {
+    const res = await axios.post('/api/v1/models/default-auction-relay/auto-learning/runs', {
+      start_date: autoLearning.value.startDate,
+      end_date: autoLearning.value.endDate,
+      tdx_vipdoc_path: autoLearning.value.tdxVipdocPath || null,
+      selected_record_ids: parseIdList(autoLearning.value.selectedRecordIdsText),
+      refresh_record_ids: parseIdList(autoLearning.value.refreshRecordIdsText),
+      sync_daily: Boolean(autoLearning.value.syncDaily),
+      sync_minute: Boolean(autoLearning.value.syncMinute),
+      recalculate_auction_ratios: Boolean(autoLearning.value.recalculateAuctionRatios),
+      validate_replay: Boolean(autoLearning.value.validateReplay),
+      build_real_samples: Boolean(autoLearning.value.buildRealSamples),
+      build_replay_samples: Boolean(autoLearning.value.buildReplaySamples),
+      audit_training_data: true,
+      run_training: Boolean(autoLearning.value.runTraining),
+      run_backtest: Boolean(autoLearning.value.runBacktest),
+      auto_activate: Boolean(autoLearning.value.autoActivate),
+      refresh_predictions: Boolean(autoLearning.value.refreshPredictions),
+      params: {
+        max_retrain_attempts: Number(autoLearning.value.maxRetrainAttempts) || 1,
+      },
+      acceptance: {
+        max_prediction_failed_count: 0,
+      },
+    })
+    const runId = res.data?.data?.run_id
+    autoLearning.value.currentRun = { id: runId, status: 'pending', phase: 'prepare', progress: 0, logs: [] }
+    await pollAutoLearningRun(runId)
+  } catch (e) {
+    autoLearning.value.error = '自动学习启动失败：' + (e.response?.data?.detail || e.message)
+  } finally {
+    autoLearning.value.creating = false
+  }
+}
+
+async function selectAutoLearningRun(runId) {
+  if (!runId) return
+  if (autoLearningPollTimer) clearTimeout(autoLearningPollTimer)
+  try {
+    const res = await axios.get(`/api/v1/models/default-auction-relay/auto-learning/runs/${runId}`)
+    autoLearning.value.currentRun = res.data?.data || null
+  } catch (e) {
+    autoLearning.value.error = '自动学习详情加载失败：' + (e.response?.data?.detail || e.message)
+  }
+}
+
+async function pollAutoLearningRun(runId) {
+  if (!runId) return
+  if (autoLearningPollTimer) clearTimeout(autoLearningPollTimer)
+  try {
+    const res = await axios.get(`/api/v1/models/default-auction-relay/auto-learning/runs/${runId}`)
+    autoLearning.value.currentRun = res.data?.data || autoLearning.value.currentRun
+    if (['pending', 'running'].includes(autoLearning.value.currentRun?.status)) {
+      autoLearningPollTimer = setTimeout(() => pollAutoLearningRun(runId), 3000)
+    } else {
+      await loadAutoLearningRuns()
+      await loadModels()
+    }
+  } catch (e) {
+    autoLearning.value.error = '自动学习进度加载失败：' + (e.response?.data?.detail || e.message)
+  }
+}
+
+async function cancelAutoLearning(runId) {
+  if (!runId) return
+  try {
+    const res = await axios.post(`/api/v1/models/default-auction-relay/auto-learning/runs/${runId}/cancel`)
+    autoLearning.value.currentRun = res.data?.data || autoLearning.value.currentRun
+    await loadAutoLearningRuns()
+  } catch (e) {
+    autoLearning.value.error = '自动学习取消失败：' + (e.response?.data?.detail || e.message)
+  }
+}
+
 async function startRelayTraining() {
   relay.value.training = true
   relay.value.trainError = ''
@@ -839,57 +1022,6 @@ async function pollRelayDiagnostics() {
   }
 }
 
-async function startTraining(mode) {
-  training.value = true
-  try {
-    const payload = {
-      start_date: trainingForm.value.start_date,
-      end_date: trainingForm.value.end_date,
-      mode,
-      auto_activate: mode === 'formal',
-      params: {
-        learning_rate: Number(trainingForm.value.learning_rate),
-        n_estimators: Number(trainingForm.value.n_estimators),
-        num_leaves: Number(trainingForm.value.num_leaves),
-        is_unbalance: Boolean(trainingForm.value.is_unbalance),
-        max_depth: Number(trainingForm.value.max_depth),
-        subsample: Number(trainingForm.value.subsample),
-        colsample_bytree: Number(trainingForm.value.colsample_bytree),
-        early_stopping_rounds: Number(trainingForm.value.early_stopping_rounds),
-        random_seed: Number(trainingForm.value.random_seed),
-      },
-      acceptance: {
-        threshold: Number(trainingForm.value.threshold),
-        min_precision: Number(trainingForm.value.min_precision),
-        min_hit_count: Number(trainingForm.value.min_hit_count),
-        max_retrain_attempts: Number(trainingForm.value.max_retrain_attempts),
-      },
-    }
-    const res = await axios.post(`/api/v1/models/${selectedModel.value}/training-jobs`, payload)
-    currentJob.value = { id: res.data?.data?.job_id, status: 'pending', progress: 0, logs: [] }
-    await pollTrainingJob()
-  } catch (e) {
-    currentJob.value = { status: 'failed', error_message: e.response?.data?.detail || e.message, progress: 100, logs: [] }
-  } finally {
-    training.value = false
-  }
-}
-
-async function pollTrainingJob() {
-  if (!currentJob.value?.id) return
-  try {
-    const res = await axios.get(`/api/v1/models/training-jobs/${currentJob.value.id}`)
-    currentJob.value = res.data?.data || currentJob.value
-    if (['pending', 'running'].includes(currentJob.value.status)) {
-      pollTimer = setTimeout(pollTrainingJob, 3000)
-    } else {
-      await loadModels()
-    }
-  } catch (e) {
-    currentJob.value = { ...currentJob.value, error_message: e.response?.data?.detail || e.message }
-  }
-}
-
 function connectModelWS() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.hostname
@@ -897,9 +1029,7 @@ function connectModelWS() {
   ws = new WebSocket(`${protocol}//${host}:${apiPort}/ws`)
   ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', channel: 'models' }))
   ws.onmessage = event => {
-    const message = JSON.parse(event.data)
-    const job = message.job
-    if (job && currentJob.value?.id === job.id) currentJob.value = job
+    JSON.parse(event.data)
   }
   ws.onerror = () => {}
 }
@@ -932,6 +1062,29 @@ function formatVersion(version) {
   if (!version) return '--'
   const text = String(version)
   return text.length > 24 ? `${text.slice(0, 8)} ${text.slice(9, 15)}...` : text
+}
+
+function formatDate(value) {
+  if (!value) return '--'
+  const text = String(value)
+  if (text.length !== 8) return text
+  return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`
+}
+
+function formatDateTime(value) {
+  if (!value) return '--'
+  return String(value).replace('T', ' ').slice(0, 19)
+}
+
+function rawDataSyncStatusText(status) {
+  const map = {
+    success: '已完成',
+    failed: '失败',
+    skipped: '已跳过',
+    not_synced: '未同步',
+    unknown: '未知',
+  }
+  return map[status] || status || '未同步'
 }
 
 function displayedVersions(name) {
@@ -975,6 +1128,37 @@ function rawActiveVersionText(model) {
   if (typeof active === 'string') return active
   return active.version || active.status || ''
 }
+
+function autoLearningStatusText(status) {
+  const map = {
+    pending: '等待中',
+    running: '运行中',
+    passed: '已通过',
+    failed: '失败',
+    cancelled: '已取消',
+  }
+  return map[status] || status || '--'
+}
+
+function autoLearningPhaseText(phase) {
+  const map = {
+    prepare: '准备',
+    sync_daily: '同步日线',
+    sync_minute: '同步分钟线',
+    recalculate_auction_ratios: '重算竞昨比',
+    validate_replay: '回放验收',
+    build_real_samples: '构建真实样本',
+    build_replay_samples: '构建回放样本',
+    audit_training_data: '训练数据审计',
+    training: '三目标训练',
+    training_diagnostics: '训练诊断',
+    backtest: '离线回测',
+    activate: '启用模型',
+    refresh_predictions: '刷新预测',
+    finish: '完成',
+  }
+  return map[phase] || phase || '--'
+}
 </script>
 
 <style scoped>
@@ -987,6 +1171,13 @@ function rawActiveVersionText(model) {
 .panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
 .panel-head h3 { margin-bottom: 4px; }
 .panel-subtitle { margin: 0; color: #6b7280; font-size: 13px; }
+.sync-date-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; color: #6b7280; font-size: 12px; }
+.sync-date-line strong { color: #111827; font-size: 14px; }
+.sync-status { font-style: normal; border-radius: 999px; padding: 2px 8px; background: #f3f4f6; color: #4b5563; }
+.sync-status.success { background: #ecfdf5; color: #047857; }
+.sync-status.failed { background: #fef2f2; color: #b91c1c; }
+.sync-status.not_synced { background: #fff7ed; color: #c2410c; }
+.sync-error { color: #b91c1c; }
 .model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
 .model-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; background: #fff; }
 .model-title { font-weight: 700; color: #0f766e; margin-bottom: 5px; }

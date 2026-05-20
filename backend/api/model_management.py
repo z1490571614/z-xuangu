@@ -25,15 +25,19 @@ from backend.services.model_engine.default_auction_relay_job_service import (
     get_default_auction_relay_diagnostics,
     run_default_auction_relay_training_job,
 )
+from backend.services.model_engine.default_auction_auto_learning_service import (
+    DefaultAuctionAutoLearningCreate,
+    create_or_reuse_auto_learning_run,
+    get_auto_learning_run,
+    list_auto_learning_runs,
+    request_cancel_auto_learning_run,
+    run_auto_learning,
+)
+from backend.services.model_engine.default_auction_raw_data_sync_service import (
+    get_default_auction_raw_data_sync_state,
+)
 from backend.services.model_engine.replay_validation_service import validate_replay_against_real
 from backend.services.model_engine.default_auction_backtest_service import run_default_auction_relay_backtest
-from backend.services.model_engine.training_job_service import (
-    AcceptanceCriteria,
-    TrainingParams,
-    create_training_job,
-    get_training_job,
-    run_training_job_sync,
-)
 from backend.services.auction_data_service import AuctionDataService
 from backend.services.tdx_local_daily_sync_service import TdxLocalDailySyncService
 from backend.services.tdx_local_minute_sync_service import TdxLocalMinuteSyncService
@@ -53,15 +57,6 @@ except ImportError:
 class RefreshPredictionsRequest(BaseModel):
     record_id: int = Field(ge=1)
     version: Optional[str] = None
-
-
-class TrainingJobRequest(BaseModel):
-    start_date: str = Field(min_length=8, max_length=8)
-    end_date: str = Field(min_length=8, max_length=8)
-    mode: str = "test"
-    auto_activate: bool = False
-    params: Dict[str, Any] = Field(default_factory=dict)
-    acceptance: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ReplayValidateRequest(BaseModel):
@@ -116,6 +111,32 @@ class DefaultAuctionBacktestRequest(BaseModel):
 class AuctionRatioRecalculateRequest(BaseModel):
     start_date: str = Field(min_length=8, max_length=8)
     end_date: str = Field(min_length=8, max_length=8)
+
+
+class DefaultAuctionAutoLearningRunRequest(BaseModel):
+    start_date: str = Field(min_length=8, max_length=8)
+    end_date: str = Field(min_length=8, max_length=8)
+    tdx_vipdoc_path: Optional[str] = None
+    ts_codes: Optional[List[str]] = None
+    selected_record_ids: Optional[List[int]] = None
+    refresh_record_ids: Optional[List[int]] = None
+    sync_daily: bool = True
+    sync_minute: bool = True
+    recalculate_auction_ratios: bool = True
+    validate_replay: bool = True
+    build_real_samples: bool = False
+    build_replay_samples: bool = False
+    audit_training_data: bool = True
+    run_training: bool = False
+    run_backtest: bool = False
+    auto_activate: bool = False
+    refresh_predictions: bool = False
+    validation_recent_days: int = Field(default=5, ge=1, le=30)
+    recent_record_limit: int = Field(default=5, ge=1, le=50)
+    minute_interval: int = Field(default=1, ge=1)
+    commit_every: int = Field(default=5000, ge=1)
+    params: Dict[str, Any] = Field(default_factory=dict)
+    acceptance: Dict[str, Any] = Field(default_factory=dict)
 
 
 class DefaultAuctionRelayTrainRequest(BaseModel):
@@ -204,6 +225,15 @@ def _resolve_pipeline_minute_ts_codes(db: Session, request: DefaultAuctionPipeli
 @router.get("/models", tags=["模型"])
 async def get_models(db: Session = Depends(get_db)):
     return ApiResponse(code=200, message="success", data=list_models(db))
+
+
+@router.get("/models/default-auction-relay/raw-data-sync-state", tags=["模型"])
+async def get_default_auction_raw_data_sync_state_endpoint(db: Session = Depends(get_db)):
+    return ApiResponse(
+        code=200,
+        message="success",
+        data=get_default_auction_raw_data_sync_state(db),
+    )
 
 
 @router.post("/models/default-auction-replay/validate", tags=["模型"])
@@ -324,6 +354,48 @@ async def recalculate_default_auction_ratios(request: AuctionRatioRecalculateReq
     return ApiResponse(code=200, message="竞昨比重算完成", data=result)
 
 
+@router.post("/models/default-auction-relay/auto-learning/runs", tags=["模型"])
+async def create_default_auction_auto_learning_run_endpoint(
+    request: DefaultAuctionAutoLearningRunRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    try:
+        request_payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+        payload = DefaultAuctionAutoLearningCreate(**request_payload)
+        run, created = create_or_reuse_auto_learning_run(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if created:
+        background_tasks.add_task(run_auto_learning, run.id)
+    message = "自动学习运行已创建" if created else "已有自动学习运行，已复用"
+    return ApiResponse(code=200, message=message, data={"run_id": run.id, "status": run.status, "reused": not created})
+
+
+@router.get("/models/default-auction-relay/auto-learning/runs", tags=["模型"])
+async def list_default_auction_auto_learning_runs_endpoint(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+):
+    return ApiResponse(code=200, message="success", data=list_auto_learning_runs(db, limit=limit))
+
+
+@router.get("/models/default-auction-relay/auto-learning/runs/{run_id}", tags=["模型"])
+async def get_default_auction_auto_learning_run_endpoint(run_id: int, db: Session = Depends(get_db)):
+    try:
+        return ApiResponse(code=200, message="success", data=get_auto_learning_run(db, run_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/models/default-auction-relay/auto-learning/runs/{run_id}/cancel", tags=["模型"])
+async def cancel_default_auction_auto_learning_run_endpoint(run_id: int, db: Session = Depends(get_db)):
+    try:
+        return ApiResponse(code=200, message="自动学习运行已取消", data=request_cancel_auto_learning_run(db, run_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.post("/models/default-auction-relay/rebuild-pipeline", tags=["模型"])
 async def rebuild_default_auction_relay_pipeline(
     request: DefaultAuctionPipelineRequest,
@@ -429,38 +501,6 @@ async def activate_version(model_name: str, version: str, db: Session = Depends(
         return ApiResponse(code=200, message=result["message"], data=result)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-
-
-@router.post("/models/{model_name}/training-jobs", tags=["模型"])
-async def create_model_training_job(
-    model_name: str,
-    request: TrainingJobRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    try:
-        job = create_training_job(
-            db,
-            model_name=model_name,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            params=TrainingParams(**request.params),
-            acceptance=AcceptanceCriteria(**request.acceptance),
-            mode=request.mode,
-            auto_activate=request.auto_activate,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    background_tasks.add_task(run_training_job_sync, job.id)
-    return ApiResponse(code=200, message="训练任务已创建", data={"job_id": job.id})
-
-
-@router.get("/models/training-jobs/{job_id}", tags=["模型"])
-async def get_model_training_job(job_id: int, db: Session = Depends(get_db)):
-    try:
-        return ApiResponse(code=200, message="success", data=get_training_job(db, job_id))
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.post("/models/{model_name}/refresh-predictions", tags=["模型"])

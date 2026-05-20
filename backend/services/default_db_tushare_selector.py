@@ -15,7 +15,7 @@ import pandas as pd
 
 from backend.database import SessionLocal
 from backend.models.seal_rate import StockDailyData
-from backend.services.auction_data_service import AuctionDataService
+from backend.services.auction_data_service import AuctionDataService, calculate_auction_metrics
 from backend.services.daily_basic_fallback import get_daily_basic_with_previous_fallback
 from backend.services.tdx_selector import TdxStockResult
 from backend.services.tdx_local_selector import is_common_a_share_ts_code
@@ -87,11 +87,19 @@ class DefaultDbTushareSelectorService:
         ts_codes = [stock.ts_code for stock in daily_candidates]
         synced_count = self.auction_service.sync_auction_open(trade_date)
         auction_features = self.auction_service.batch_get_auction_features(trade_date, ts_codes)
+        realtime_fallback_features = self._build_realtime_auction_features(
+            daily_candidates,
+            auction_features,
+            data_collector,
+        )
+        if realtime_fallback_features:
+            auction_features = {**realtime_fallback_features, **auction_features}
 
         passed = []
         funnel = {
             "daily_candidates": len(daily_candidates),
             "auction_synced": synced_count,
+            "auction_realtime_fallback": len(realtime_fallback_features),
             "has_auction": 0,
             "auction_ratio_pass": 0,
             "auction_turnover_pass": 0,
@@ -131,6 +139,12 @@ class DefaultDbTushareSelectorService:
 
         if missing_auction:
             logger.warning("数据库日线通道存在竞价数据缺失，示例: %s", ",".join(missing_auction))
+        if realtime_fallback_features:
+            logger.warning(
+                "Tushare竞价缺失，已使用通达信实时行情兜底计算竞价特征: %s/%s",
+                len(realtime_fallback_features),
+                len(daily_candidates),
+            )
 
         execution_time = time.time() - start
         logger.info(
@@ -203,7 +217,7 @@ class DefaultDbTushareSelectorService:
             if is_common_a_share_ts_code(row.ts_code):
                 rows_by_code[row.ts_code].append(row)
 
-        circ_mv_map = self._build_circ_mv_map(data_collector, trade_date, max_circ_mv)
+        daily_basic_map = self._build_daily_basic_map(data_collector, trade_date, max_circ_mv)
         stock_info = self._build_stock_info_map(data_collector)
 
         selected = []
@@ -213,7 +227,8 @@ class DefaultDbTushareSelectorService:
                 continue
             if latest.close is None or latest.close >= max_close_price:
                 continue
-            circ_mv = circ_mv_map.get(ts_code)
+            daily_basic = daily_basic_map.get(ts_code, {})
+            circ_mv = daily_basic.get("circ_mv")
             if circ_mv is not None and circ_mv >= max_circ_mv:
                 continue
             if len(stock_rows) < 11:
@@ -248,6 +263,9 @@ class DefaultDbTushareSelectorService:
                         "seal_rate": seal["seal_rate"],
                         "seal_rate_data_complete": 1 if len(period_rows) >= period_days else 0,
                         "circ_mv": circ_mv,
+                        "previous_daily_vol": latest.vol,
+                        "float_share": daily_basic.get("float_share"),
+                        "free_share": daily_basic.get("free_share"),
                     },
                 )
             )
@@ -269,12 +287,12 @@ class DefaultDbTushareSelectorService:
             "seal_rate": round(limit_up_days / touch_days * 100, 2) if touch_days > 0 else None,
         }
 
-    def _build_circ_mv_map(
+    def _build_daily_basic_map(
         self,
         data_collector: Optional[Any],
         trade_date: str,
         max_circ_mv: float,
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Dict[str, Optional[float]]]:
         if data_collector is None:
             return {}
         try:
@@ -291,12 +309,85 @@ class DefaultDbTushareSelectorService:
             for row in df.to_dict("records"):
                 ts_code = row.get("ts_code")
                 circ_mv = _clean_float(row.get("circ_mv"))
-                if ts_code and circ_mv is not None:
-                    result[ts_code] = circ_mv / 10000
+                if ts_code:
+                    result[ts_code] = {
+                        "circ_mv": circ_mv / 10000 if circ_mv is not None else None,
+                        "float_share": _clean_float(row.get("float_share")),
+                        "free_share": _clean_float(row.get("free_share")),
+                    }
             return result
         except Exception as e:
             logger.warning("数据库日线选股获取市值失败: %s", e)
             return {}
+
+    def _build_circ_mv_map(
+        self,
+        data_collector: Optional[Any],
+        trade_date: str,
+        max_circ_mv: float,
+    ) -> Dict[str, float]:
+        daily_basic_map = self._build_daily_basic_map(data_collector, trade_date, max_circ_mv)
+        return {
+            ts_code: values["circ_mv"]
+            for ts_code, values in daily_basic_map.items()
+            if values.get("circ_mv") is not None
+        }
+
+    def _build_realtime_auction_features(
+        self,
+        daily_candidates: List[TdxStockResult],
+        existing_features: Dict[str, Dict[str, Any]],
+        data_collector: Optional[Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        if data_collector is None or not hasattr(data_collector, "get_realtime_quotes"):
+            return {}
+
+        missing_stocks = [
+            stock
+            for stock in daily_candidates
+            if stock.ts_code and stock.ts_code not in existing_features
+        ]
+        if not missing_stocks:
+            return {}
+
+        try:
+            realtime = data_collector.get_realtime_quotes([stock.ts_code for stock in missing_stocks])
+        except Exception as e:
+            logger.warning("通达信实时行情竞价兜底失败: %s", e)
+            return {}
+
+        fallback = {}
+        for stock in missing_stocks:
+            rt = realtime.get(stock.ts_code)
+            if not rt:
+                continue
+            auction_volume = _clean_float(rt.get("volume"))
+            if auction_volume is None:
+                volume_hand = _clean_float(rt.get("volume_hand") or rt.get("total_hand"))
+                auction_volume = volume_hand * 100 if volume_hand is not None else None
+            if auction_volume is None or auction_volume <= 0:
+                continue
+
+            extra = stock.extra_data or {}
+            metrics = calculate_auction_metrics(
+                auction_volume,
+                extra.get("previous_daily_vol"),
+                extra.get("float_share"),
+                extra.get("free_share"),
+            )
+            if metrics["auction_ratio"] is None or metrics["auction_turnover_rate"] is None:
+                continue
+
+            fallback[stock.ts_code] = {
+                "price": rt.get("open") or rt.get("close"),
+                "auction_volume": auction_volume,
+                "auction_amount": rt.get("amount"),
+                "auction_pre_close": rt.get("pre_close"),
+                "auction_ratio": metrics["auction_ratio"],
+                "auction_turnover_rate": metrics["auction_turnover_rate"],
+                "auction_source": "tdx_realtime_quote_fallback",
+            }
+        return fallback
 
     def _collector_calendar(self, data_collector: Any, trade_date: str) -> set[str]:
         try:

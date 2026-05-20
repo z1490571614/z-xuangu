@@ -21,8 +21,6 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
-T0_MODEL_DISCLAIMER = "T+0成功率由历史样本模型估算，仅作排序参考，不构成投资建议；模型不可用时显示为空且不影响最终评分。"
-
 # 注入的 MCP 函数
 _tdx_mcp_func = None
 
@@ -318,8 +316,6 @@ async def get_selection_detail(
                 "board_type": stock.board_type or fallback.get("board_type"),
                 "rule_score": _float_or_none(stock.rule_score),
                 "model_score": _float_or_none(stock.model_score),
-                "t0_limit_success_prob": _float_or_none(stock.t0_limit_success_prob),
-                "t0_limit_success_model_version": stock.t0_limit_success_model_version,
                 "default_t0_limit_prob": _float_or_none(stock.default_t0_limit_prob),
                 "default_t1_premium_prob": _float_or_none(stock.default_t1_premium_prob),
                 "default_t1_continue_prob": _float_or_none(stock.default_t1_continue_prob),
@@ -355,7 +351,6 @@ async def get_selection_detail(
             "status": record.status,
             "execution_time": record.execution_time,
             "notification_sent": record.notification_sent,
-            "t0_model_disclaimer": T0_MODEL_DISCLAIMER,
             "stocks": stock_list
         }
 

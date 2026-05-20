@@ -46,7 +46,6 @@ class SelectedStock(Base):
     # 评分字段
     rule_score = Column(DECIMAL(5, 2), nullable=True)
     model_score = Column(DECIMAL(5, 2), nullable=True)
-    t0_limit_success_prob = Column(DECIMAL(5, 2), nullable=True)
     default_t0_limit_prob = Column(DECIMAL(5, 2), nullable=True)
     default_t1_premium_prob = Column(DECIMAL(5, 2), nullable=True)
     default_t1_continue_prob = Column(DECIMAL(5, 2), nullable=True)
@@ -58,7 +57,6 @@ class SelectedStock(Base):
     risk_tags = Column(Text, nullable=True)  # JSON array
     next_day_plan = Column(Text, nullable=True)
     model_version = Column(String(50), nullable=True)
-    t0_limit_success_model_version = Column(String(50), nullable=True)
     default_relay_model_version = Column(String(255), nullable=True)
 
     created_at = Column(DateTime, server_default=func.now())

@@ -21,6 +21,7 @@ def run_default_auction_relay_backtest(
     start_date: str,
     end_date: str,
     version: Optional[str] = None,
+    target_versions: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     targets = {
         model_name: run_default_auction_target_backtest(
@@ -29,7 +30,7 @@ def run_default_auction_relay_backtest(
             label_column=label_column,
             start_date=start_date,
             end_date=end_date,
-            version=version,
+            version=(target_versions or {}).get(model_name) or version,
         )
         for model_name, label_column in TARGET_LABELS.items()
     }

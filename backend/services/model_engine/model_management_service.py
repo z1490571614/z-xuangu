@@ -20,7 +20,6 @@ from backend.services.model_engine.default_auction_attribution_service import (
 
 MODEL_OUTPUT_FIELDS: Dict[str, Tuple[str, str]] = {
     "active_auction_lgbm": ("model_score", "model_version"),
-    "leader_main_t0_lgbm": ("t0_limit_success_prob", "t0_limit_success_model_version"),
 }
 
 DEFAULT_AUCTION_RELAY_MODEL_NAME = "default_auction_relay_v2"

@@ -22,6 +22,16 @@
         <p class="value stat-date">{{ stats.tradeDate || '--' }}</p>
       </div>
       <div class="stat-card">
+        <h3>训练数据同步至</h3>
+        <p class="value stat-date">{{ formatDate(rawDataSyncState?.synced_to_date || rawDataSyncState?.trade_date) }}</p>
+        <p class="stat-label">
+          <span :class="['sync-status', rawDataSyncState?.status]">{{ rawDataSyncStatusText(rawDataSyncState?.status) }}</span>
+          <span v-if="rawDataSyncState?.finished_at">更新 {{ formatDateTime(rawDataSyncState.finished_at) }}</span>
+          <span v-else-if="rawDataSyncLoading">加载中</span>
+          <span v-else-if="rawDataSyncError" class="sync-error">{{ rawDataSyncError }}</span>
+        </p>
+      </div>
+      <div class="stat-card">
         <h3>选股模型</h3>
         <p :class="['stat-value', stats.modelEnabled ? 'ok' : 'err']">{{ stats.modelEnabled ? '已启用' : '未启用' }}</p>
       </div>
@@ -57,10 +67,6 @@
       </div>
 
       <div class="model-guide">
-        <div class="model-guide-item">
-          <strong>旧T0参考</strong>
-          <span>早期模型输出，仅作为历史兼容参考，不参与默认接力分。</span>
-        </div>
         <div class="model-guide-item">
           <strong>当日涨停</strong>
           <span>目标一，衡量竞价后当天继续冲击涨停的概率。</span>
@@ -113,12 +119,6 @@
               <th @click="sortBy('health_score')" class="sortable">
                 龙头评级
                 <span v-if="sortField === 'health_score'" class="sort-icon">
-                  {{ sortOrder === 'asc' ? '↑' : '↓' }}
-                </span>
-              </th>
-              <th @click="sortBy('t0_limit_success_prob')" class="sortable lightgbm-col">
-                旧T0参考
-                <span v-if="sortField === 't0_limit_success_prob'" class="sort-icon">
                   {{ sortOrder === 'asc' ? '↑' : '↓' }}
                 </span>
               </th>
@@ -193,10 +193,6 @@
                 </span>
                 <span v-else class="muted">--</span>
               </td>
-              <td class="num-cell lightgbm-prob" :title="lightGbmTitle(stock)">
-                <span class="model-label">旧</span>
-                <span>{{ fmtPct(stock.t0_limit_success_prob) }}</span>
-              </td>
               <td class="num-cell model-prob relay-prob" :title="defaultRelayTitle(stock, 't0')">
                 {{ fmtPct1(stock.default_t0_limit_prob) }}
               </td>
@@ -262,6 +258,9 @@ const loaded = ref(false)
 const selecting = ref(false)
 const message = ref(null)
 const latestStocks = ref([])
+const rawDataSyncState = ref(null)
+const rawDataSyncLoading = ref(false)
+const rawDataSyncError = ref('')
 const latestDate = ref('')
 const showStrategyModal = ref(false)
 const sortField = ref('health_score')
@@ -290,7 +289,7 @@ const sortedStocks = computed(() => {
   return sorted
 })
 
-onMounted(async () => { await loadStats(); await loadLatest() })
+onMounted(async () => { await loadStats(); await Promise.all([loadLatest(), loadRawDataSyncState()]) })
 
 async function loadStats() {
   try {
@@ -332,6 +331,19 @@ async function loadLatest() {
       stats.value.modelEnabled = false
     }
   } catch (e) { console.error('加载最新失败:', e) }
+}
+
+async function loadRawDataSyncState() {
+  rawDataSyncLoading.value = true
+  rawDataSyncError.value = ''
+  try {
+    const res = await axios.get('/api/v1/models/default-auction-relay/raw-data-sync-state')
+    rawDataSyncState.value = res.data?.data || null
+  } catch (e) {
+    rawDataSyncError.value = e.response?.data?.detail || e.message || '加载失败'
+  } finally {
+    rawDataSyncLoading.value = false
+  }
 }
 
 function sortBy(field) {
@@ -378,11 +390,6 @@ function leaderLevelClass(stock) {
   if (lvl === '极强龙头' || lvl === '强势龙头') return 'level-high'
   if (lvl === '疑似龙头' || lvl === '跟风强势股') return 'level-mid'
   return 'level-low'
-}
-
-function lightGbmTitle(stock) {
-  const version = stock.t0_limit_success_model_version || '未启用模型'
-  return `旧T0参考模型：预测历史样本下的T+0封板概率。版本：${version}`
 }
 
 function defaultRelayTitle(stock, target) {
@@ -459,6 +466,28 @@ function fmtPct(v) { return v != null ? Number(v).toFixed(2) + '%' : '--' }
 function fmtPct1(v) { return v != null ? Number(v).toFixed(1) + '%' : '--' }
 function fmtScore(v) { return v != null ? Number(v).toFixed(1) : '--' }
 
+function formatDate(value) {
+  if (!value) return '--'
+  const text = String(value)
+  if (text.length === 8) return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`
+  return text
+}
+
+function formatDateTime(value) {
+  if (!value) return '--'
+  const text = String(value).replace('T', ' ')
+  return text.slice(0, 19)
+}
+
+function rawDataSyncStatusText(status) {
+  return {
+    success: '成功',
+    running: '同步中',
+    failed: '失败',
+    not_synced: '未同步',
+  }[status] || '未知'
+}
+
 function getPctClass(v) {
   if (v == null) return ''
   if (v > 0) return 'positive'
@@ -477,6 +506,12 @@ function getPctClass(v) {
 .stat-value.err { color: #ff4d4f; }
 .stat-label { margin: 4px 0 0; color: #999; font-size: 12px; }
 .stat-date { font-size: 22px !important; }
+.sync-status { display: inline-block; margin-right: 6px; border-radius: 999px; padding: 2px 8px; background: #f3f4f6; color: #4b5563; font-size: 12px; }
+.sync-status.success { background: #ecfdf5; color: #047857; }
+.sync-status.running { background: #e6f4ff; color: #1677ff; }
+.sync-status.failed { background: #fef2f2; color: #b91c1c; }
+.sync-status.not_synced { background: #fff7ed; color: #c2410c; }
+.sync-error { color: #b91c1c; }
 .actions { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap; }
 .btn-primary { padding: 10px 20px; border: none; border-radius: 4px; background: #1890ff; color: white; cursor: pointer; font-size: 14px; transition: all 0.25s; }
 .btn-primary:hover:not(:disabled) { background: #096dd9; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(24,144,255,0.35); }
@@ -606,10 +641,8 @@ function getPctClass(v) {
 .score-level-tag.level-high { background: #f6ffed; color: #52c41a; }
 .score-level-tag.level-mid { background: #fff7e6; color: #fa8c16; }
 .score-level-tag.level-low { background: #fff2f0; color: #ff4d4f; }
-.lightgbm-col { min-width: 88px; }
 .relay-prob-col { min-width: 96px; }
 .relay-score-col { min-width: 76px; }
-.lightgbm-prob { color: #08979c; font-weight: 700; }
 .relay-prob { color: #1d4ed8; font-weight: 700; }
 .relay-score { color: #b45309; font-weight: 800; }
 .model-label {

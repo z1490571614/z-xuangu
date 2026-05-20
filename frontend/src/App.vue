@@ -6,6 +6,7 @@
         <router-link to="/" exact-active-class="active">首页</router-link>
         <router-link to="/stock-results" active-class="active">选股结果</router-link>
         <router-link to="/models" active-class="active">模型中心</router-link>
+        <router-link to="/backtest/t0-simulation" active-class="active">日线模拟回测</router-link>
         <router-link to="/tasks" active-class="active">任务管理</router-link>
         <router-link to="/settings" active-class="active">系统设置</router-link>
       </nav>

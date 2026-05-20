@@ -111,3 +111,49 @@ def test_run_default_auction_relay_backtest_returns_three_targets(db, monkeypatc
 
     assert set(result["targets"]) == set(default_auction_backtest_service.TARGET_LABELS)
     assert result["targets"]["default_auction_t1_continue_lgbm"]["metrics"]["baseline_rate"] == 0.0
+
+
+def test_run_default_auction_relay_backtest_accepts_target_version_mapping(db, monkeypatch):
+    _clear_tables(db)
+    for model_name in default_auction_backtest_service.TARGET_LABELS:
+        _add_model(db, model_name)
+        db.add(
+            ModelVersion(
+                model_name=model_name,
+                version=f"{model_name}_new",
+                feature_cols=json.dumps(["auction_ratio", "auction_turnover_rate"], ensure_ascii=False),
+                params=json.dumps({"feature_units": {"auction_ratio": "percent"}}, ensure_ascii=False),
+                model_path=f"/tmp/{model_name}_new.pkl",
+                is_active=0,
+            )
+        )
+    _add_sample(
+        db,
+        "20260501",
+        "000001.SZ",
+        9,
+        {
+            "label_t0_limit_success": 1,
+            "label_t1_premium_success": 1,
+            "label_t1_continue_limit": 0,
+        },
+    )
+    db.commit()
+    monkeypatch.setattr(
+        default_auction_backtest_service.lightgbm_service,
+        "_predict_with_model_path",
+        lambda model_name, path, cols, features, units: features["auction_ratio"],
+    )
+
+    result = default_auction_backtest_service.run_default_auction_relay_backtest(
+        db,
+        start_date="20260501",
+        end_date="20260501",
+        target_versions={
+            model_name: f"{model_name}_new"
+            for model_name in default_auction_backtest_service.TARGET_LABELS
+        },
+    )
+
+    for model_name in default_auction_backtest_service.TARGET_LABELS:
+        assert result["targets"][model_name]["version"] == f"{model_name}_new"

@@ -324,7 +324,6 @@ python test_detail_page.py
 | 模型 | 模型名 | 维数 | 用途 | 评分权重 |
 |------|--------|------|------|----------|
 | 竞价通用 | `active_auction_lgbm` | 8 | 竞价活跃度+封板率+趋势 | final_score ×35% |
-| 龙头T+0 | `leader_main_t0_lgbm` | 9 | 龙头股T+0封板概率 | final_score ×10% |
 | 默认接力T+0 | `default_auction_t0_limit_lgbm` | 14 | T日封板概率 | 独立展示 |
 | 默认接力T+1溢价 | `default_auction_t1_premium_lgbm` | 14 | T+1溢价概率 | 独立展示 |
 | 默认接力T+1连板 | `default_auction_t1_continue_lgbm` | 14 | T+1连板概率 | 独立展示 |

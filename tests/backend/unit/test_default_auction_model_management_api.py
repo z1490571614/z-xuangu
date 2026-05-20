@@ -3,7 +3,15 @@ import json
 import pytest
 
 from backend.database import Base, engine
-from backend.models import DefaultAuctionTrainingSample, ModelTrainingJob, ModelVersion, SelectedStock, SelectionRecord
+from backend.models import (
+    DefaultAuctionAutoLearningRun,
+    DefaultAuctionTrainingSample,
+    ModelTrainingJob,
+    ModelVersion,
+    SelectedStock,
+    SelectionRecord,
+    SystemConfig,
+)
 from backend.models.auction_backtest import StockAuctionOpen
 from backend.services.model_engine import model_management_service
 
@@ -25,6 +33,122 @@ def test_default_auction_replay_validate_api(client, monkeypatch):
     assert resp.json()["data"]["accepted"] is True
     assert resp.json()["data"]["recent_days"] == 3
     assert captured["recent_days"] == 3
+
+
+def test_default_auction_raw_data_sync_state_api(client, db):
+    from backend.services.model_engine.default_auction_raw_data_sync_service import RAW_SYNC_STATE_KEY
+
+    db.query(SystemConfig).filter(SystemConfig.key == RAW_SYNC_STATE_KEY).delete()
+    db.add(
+        SystemConfig(
+            key=RAW_SYNC_STATE_KEY,
+            value=json.dumps(
+                {
+                    "trade_date": "20260518",
+                    "status": "success",
+                    "trigger": "startup",
+                    "finished_at": "2026-05-18T08:01:00",
+                },
+                ensure_ascii=False,
+            ),
+            value_type="json",
+        )
+    )
+    db.commit()
+
+    resp = client.get("/api/v1/models/default-auction-relay/raw-data-sync-state")
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["trade_date"] == "20260518"
+    assert data["status"] == "success"
+    assert data["trigger"] == "startup"
+
+
+def test_default_auction_auto_learning_run_api_creates_lists_gets_and_cancels(client, monkeypatch, db):
+    from backend.api import model_management
+
+    db.query(DefaultAuctionAutoLearningRun).delete()
+    db.commit()
+
+    executed = []
+
+    def fake_run_auto_learning(run_id):
+        executed.append(run_id)
+
+    monkeypatch.setattr(model_management, "run_auto_learning", fake_run_auto_learning)
+
+    resp = client.post(
+        "/api/v1/models/default-auction-relay/auto-learning/runs",
+        json={
+            "start_date": "20240501",
+            "end_date": "20240510",
+            "sync_daily": False,
+            "sync_minute": False,
+            "recalculate_auction_ratios": True,
+            "audit_training_data": True,
+            "run_training": False,
+            "run_backtest": False,
+            "auto_activate": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    run_id = resp.json()["data"]["run_id"]
+    assert resp.json()["data"]["status"] == "pending"
+    assert resp.json()["data"]["reused"] is False
+    assert executed == [run_id]
+
+    repeat = client.post(
+        "/api/v1/models/default-auction-relay/auto-learning/runs",
+        json={
+            "start_date": "20240511",
+            "end_date": "20240512",
+            "sync_daily": False,
+            "sync_minute": False,
+            "recalculate_auction_ratios": True,
+            "audit_training_data": True,
+            "run_training": False,
+            "run_backtest": False,
+            "auto_activate": False,
+        },
+    )
+
+    assert repeat.status_code == 200
+    assert repeat.json()["data"]["run_id"] == run_id
+    assert repeat.json()["data"]["status"] == "pending"
+    assert repeat.json()["data"]["reused"] is True
+    assert executed == [run_id]
+
+    detail = client.get(f"/api/v1/models/default-auction-relay/auto-learning/runs/{run_id}")
+    assert detail.status_code == 200
+    assert detail.json()["data"]["id"] == run_id
+    assert detail.json()["data"]["options"]["recalculate_auction_ratios"] is True
+
+    listing = client.get("/api/v1/models/default-auction-relay/auto-learning/runs?limit=5")
+    assert listing.status_code == 200
+    assert any(item["id"] == run_id for item in listing.json()["data"])
+
+    cancel = client.post(f"/api/v1/models/default-auction-relay/auto-learning/runs/{run_id}/cancel")
+    assert cancel.status_code == 200
+    assert cancel.json()["data"]["status"] == "cancelled"
+
+
+def test_default_auction_auto_learning_api_rejects_bad_activation_contract(client):
+    resp = client.post(
+        "/api/v1/models/default-auction-relay/auto-learning/runs",
+        json={
+            "start_date": "20240501",
+            "end_date": "20240510",
+            "run_training": True,
+            "run_backtest": False,
+            "audit_training_data": True,
+            "auto_activate": True,
+        },
+    )
+
+    assert resp.status_code == 422
+    assert "auto_activate" in resp.json()["detail"]
 
 
 def test_default_auction_samples_build_api(client, monkeypatch):
@@ -295,7 +419,7 @@ def test_default_auction_relay_diagnostics_rejects_non_relay_job(client, db):
     db.query(ModelTrainingJob).delete()
     db.commit()
     job = ModelTrainingJob(
-        model_name="leader_main_t0_lgbm",
+        model_name="active_auction_lgbm",
         status="pending",
         phase="prepare",
         progress=0,

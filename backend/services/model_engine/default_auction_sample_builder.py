@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 
 from backend.models import (
     DefaultAuctionTrainingSample,
-    LeaderMainT0TrainingSample,
     SelectionRecord,
     SelectedStock,
     StockAuctionOpen,
@@ -120,21 +119,6 @@ def _apply_daily_metrics(features: Dict[str, Any], daily_metrics: Optional[Dict[
         features["pre_change_pct"] = daily_metrics.get("pre_change_pct")
 
 
-def _apply_leader_t0_features(features: Dict[str, Any], leader_row: Optional[LeaderMainT0TrainingSample]) -> None:
-    if leader_row is None:
-        return
-    mapping = {
-        "circ_mv": leader_row.circ_mv,
-        "sector_change_pct": leader_row.sector_change_pct,
-        "sector_limit_up_count": leader_row.sector_limit_up_count,
-        "sector_rank": leader_row.sector_hot_rank,
-        "rule_score": leader_row.rule_score,
-    }
-    for key, value in mapping.items():
-        if value is not None:
-            features[key] = _json_safe(value)
-
-
 def _build_feature_json(stock: SelectedStock, daily_metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     features: Dict[str, Any] = {}
     for field in FEATURE_FIELDS:
@@ -185,16 +169,6 @@ def build_selected_stock_feature_payloads(
     }
     daily_default_metrics = DefaultAuctionReplayService(db).load_daily_default_metrics(record.trade_date, ts_codes)
     market_context = _build_market_contexts(db, [record.trade_date]).get(record.trade_date)
-    leader_t0_rows = {
-        row.ts_code: row
-        for row in db.query(LeaderMainT0TrainingSample)
-        .filter(
-            LeaderMainT0TrainingSample.trade_date == record.trade_date,
-            LeaderMainT0TrainingSample.ts_code.in_(ts_codes),
-        )
-        .all()
-    }
-
     payloads: Dict[str, Dict[str, Any]] = {}
     for stock in stocks:
         if not stock.ts_code:
@@ -202,7 +176,6 @@ def build_selected_stock_feature_payloads(
         auction = auctions.get(stock.ts_code)
         features = _build_feature_json(stock, daily_default_metrics.get(stock.ts_code))
         _apply_auction_open_features(features, auction)
-        _apply_leader_t0_features(features, leader_t0_rows.get(stock.ts_code))
         if market_context is not None:
             features.update(market_context)
         payloads[stock.ts_code] = {
@@ -291,7 +264,6 @@ def _auction_feature_json(
     snapshot: StockFeatureSnapshot | None = None,
     daily_metrics: Optional[Dict[str, Any]] = None,
     market_context: Optional[Dict[str, Any]] = None,
-    leader_t0_features: Optional[LeaderMainT0TrainingSample] = None,
 ) -> Dict[str, Any]:
     features = {
         "auction_ratio": row.auction_ratio,
@@ -320,7 +292,6 @@ def _auction_feature_json(
                 ),
             }
         )
-    _apply_leader_t0_features(features, leader_t0_features)
     _apply_daily_metrics(features, daily_metrics)
     if market_context is not None:
         features.update(market_context)
@@ -584,15 +555,6 @@ def build_samples_from_replay_range(
                 .filter(StockFeatureSnapshot.trade_date == trade_date, StockFeatureSnapshot.ts_code.in_(replay_codes))
                 .all()
             }
-            leader_t0_rows = {
-                row.ts_code: row
-                for row in db.query(LeaderMainT0TrainingSample)
-                .filter(
-                    LeaderMainT0TrainingSample.trade_date == trade_date,
-                    LeaderMainT0TrainingSample.ts_code.in_(replay_codes),
-                )
-                .all()
-            }
             daily_default_metrics = replay_service.load_daily_default_metrics(trade_date, replay_codes)
             for auction in auction_rows:
                 if sample_source == "replay_backtest" and _has_real_selected_sample(
@@ -645,7 +607,6 @@ def build_samples_from_replay_range(
                         snapshots.get(auction.ts_code),
                         daily_default_metrics.get(auction.ts_code),
                         market_contexts.get(trade_date),
-                        leader_t0_rows.get(auction.ts_code),
                     )
                 )
                 _apply_market_labels(existing, auction.ts_code, trade_date, next_date, market_daily_rows)

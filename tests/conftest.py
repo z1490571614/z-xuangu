@@ -14,6 +14,7 @@ os.environ.setdefault("SECRET_KEY", "test_secret_key_for_testing_purposes_only")
 os.environ.setdefault("DATABASE_URL", "sqlite:///./data/test_xuangu.db")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://testserver")
 os.environ.setdefault("LOG_DIR", "logs")
+os.environ.setdefault("DEFAULT_AUCTION_RAW_SYNC_ENABLED", "false")
 
 from backend.database import engine, Base, SessionLocal
 import backend.models  # noqa: F401 - register all ORM models before create_all

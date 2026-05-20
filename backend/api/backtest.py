@@ -1,19 +1,23 @@
 """
-竞价增强回测与龙头主升 T+0 模型操作接口。
+竞价增强回测与当日涨停模型日线模拟盘接口。
 """
-import json
+
 from typing import List
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.database import SessionLocal
-from backend.models.auction_backtest import LeaderMainT0TrainingSample
 from backend.schemas.common import ApiResponse
 from backend.services.auction_data_service import AuctionDataService
-from backend.services.backtest.leader_main_t0_feature_builder import LeaderMainT0FeatureBuilder
-from backend.services.backtest.leader_main_t0_label_builder import LeaderMainT0LabelBuilder
-from backend.services.model_engine.lightgbm_service import train_leader_main_t0_lgbm
+from backend.services.model_engine.t0_simulation_backtest_service import (
+    T0SimulationBacktestCreate,
+    create_t0_simulation_backtest_run,
+    get_t0_simulation_backtest_run,
+    list_t0_simulation_backtest_runs,
+    request_cancel_t0_simulation_backtest_run,
+    run_t0_simulation_backtest,
+)
 from backend.services.tdx_local_daily_sync_service import TdxLocalDailySyncService
 
 router = APIRouter()
@@ -21,10 +25,6 @@ router = APIRouter()
 
 class AuctionSyncRequest(BaseModel):
     trade_date: str = Field(..., min_length=8, max_length=8)
-
-
-class LeaderMainT0BuildRequest(BaseModel):
-    trade_dates: List[str] = Field(..., min_length=1)
 
 
 class DateRangeRequest(BaseModel):
@@ -36,8 +36,24 @@ class TdxLocalDailySyncRequest(DateRangeRequest):
     ts_codes: List[str] | None = None
 
 
-class LeaderMainT0RunRequest(DateRangeRequest):
-    train_model: bool = False
+class T0SimulationBacktestRequest(DateRangeRequest):
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_version: str | None = None
+    sample_source: str = "replay_backtest"
+    initial_cash: float = Field(default=100000, gt=0)
+    buy_top_n: int = Field(default=2, ge=1)
+    max_positions: int = Field(default=4, ge=1)
+    min_buy_prob_pct: float = Field(default=50, ge=0, le=100)
+    min_open_change_pct: float = -3
+    max_open_change_pct: float = 7
+    take_profit_pct: float = 8
+    high_profit_hold_pct: float = Field(default=13, gt=0)
+    profit_pullback_pct: float = Field(default=5, gt=0)
+    stop_loss_pct: float = -5
+    max_holding_days: int = Field(default=3, ge=1)
+    force_close_on_end: bool = False
+    cost: dict = Field(default_factory=dict)
 
 
 @router.post("/backtest/auction/sync", tags=["回测"])
@@ -110,155 +126,59 @@ async def recalculate_auction_ratios(request: DateRangeRequest):
         raise HTTPException(status_code=500, detail=f"竞昨比重算失败: {e}")
 
 
-@router.post("/backtest/leader-main-t0/build", tags=["回测"])
-async def build_leader_main_t0_samples(request: LeaderMainT0BuildRequest):
-    """构建龙头主升 T+0 候选训练样本。"""
-    try:
-        count = LeaderMainT0FeatureBuilder().build_leader_main_t0_range(request.trade_dates)
-        return ApiResponse(
-            code=200,
-            message="龙头主升T+0样本构建完成",
-            data={"trade_dates": request.trade_dates, "saved_count": count},
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"样本构建失败: {e}")
-
-
-@router.post("/backtest/leader-main-t0/labels", tags=["回测"])
-async def build_leader_main_t0_labels(request: DateRangeRequest):
-    """给候选样本生成 T+0 非一字涨停成功标签。"""
-    try:
-        count = LeaderMainT0LabelBuilder().build_leader_main_t0_labels(
-            request.start_date,
-            request.end_date,
-        )
-        return ApiResponse(
-            code=200,
-            message="龙头主升T+0标签生成完成",
-            data={
-                "start_date": request.start_date,
-                "end_date": request.end_date,
-                "updated_count": count,
-            },
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"标签生成失败: {e}")
-
-
-@router.post("/backtest/leader-main-t0/train", tags=["模型"])
-async def train_leader_main_t0(request: DateRangeRequest):
-    """训练 leader_main_t0_lgbm 模型。"""
-    try:
-        model_path = train_leader_main_t0_lgbm(request.start_date, request.end_date)
-        return ApiResponse(
-            code=200,
-            message="龙头主升T+0模型训练完成" if model_path else "训练未生成模型",
-            data={
-                "start_date": request.start_date,
-                "end_date": request.end_date,
-                "model_path": model_path,
-            },
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"模型训练失败: {e}")
-
-
-@router.post("/backtest/leader-main-t0/run", tags=["回测"])
-async def run_leader_main_t0_pipeline(request: LeaderMainT0RunRequest):
-    """按日期区间执行同步竞价、构建样本、生成标签，按需训练模型。"""
-    try:
-        auction_result = AuctionDataService().sync_auction_open_date_range(
-            request.start_date,
-            request.end_date,
-        )
-        trade_dates = auction_result.get("trade_dates", [])
-        saved_count = LeaderMainT0FeatureBuilder().build_leader_main_t0_range(trade_dates)
-        updated_count = LeaderMainT0LabelBuilder().build_leader_main_t0_labels(
-            request.start_date,
-            request.end_date,
-        )
-        model_path = None
-        if request.train_model:
-            model_path = train_leader_main_t0_lgbm(request.start_date, request.end_date)
-
-        return ApiResponse(
-            code=200,
-            message="龙头主升T+0回测流程完成",
-            data={
-                "start_date": request.start_date,
-                "end_date": request.end_date,
-                "trade_dates": trade_dates,
-                "synced_count": auction_result.get("synced_count", 0),
-                "saved_count": saved_count,
-                "updated_count": updated_count,
-                "model_path": model_path,
-            },
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"回测流程执行失败: {e}")
-
-
-@router.get("/backtest/leader-main-t0/samples", tags=["回测"])
-async def list_leader_main_t0_samples(
-    start_date: str = Query(..., min_length=8, max_length=8),
-    end_date: str = Query(..., min_length=8, max_length=8),
-    ts_code: str | None = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
+@router.post("/backtest/t0-simulation/runs", tags=["回测"])
+async def create_t0_simulation_backtest_endpoint(
+    request: T0SimulationBacktestRequest,
+    background_tasks: BackgroundTasks,
 ):
-    """查询龙头主升 T+0 回测样本与标签。"""
     db = SessionLocal()
     try:
-        query = db.query(LeaderMainT0TrainingSample).filter(
-            LeaderMainT0TrainingSample.trade_date.between(start_date, end_date)
-        )
-        if ts_code:
-            query = query.filter(LeaderMainT0TrainingSample.ts_code == ts_code)
-        total = query.count()
-        rows = query.order_by(
-            LeaderMainT0TrainingSample.trade_date.desc(),
-            LeaderMainT0TrainingSample.rule_score.desc(),
-        ).offset((page - 1) * page_size).limit(page_size).all()
+        payload = T0SimulationBacktestCreate(**(request.model_dump() if hasattr(request, "model_dump") else request.dict()))
+        run = create_t0_simulation_backtest_run(db, payload)
+        background_tasks.add_task(run_t0_simulation_backtest, None, run.id)
         return ApiResponse(
             code=200,
-            message="success",
-            data={
-                "total": total,
-                "page": page,
-                "page_size": page_size,
-                "samples": [_sample_to_dict(row) for row in rows],
-            },
+            message="日线模拟回测已创建",
+            data={"run_id": run.id, "status": run.status},
         )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询样本失败: {e}")
+        raise HTTPException(status_code=500, detail=f"创建日线模拟回测失败: {e}")
     finally:
         db.close()
 
 
-def _sample_to_dict(row: LeaderMainT0TrainingSample) -> dict:
+@router.get("/backtest/t0-simulation/runs", tags=["回测"])
+async def list_t0_simulation_backtest_endpoint(limit: int = Query(20, ge=1, le=100)):
+    db = SessionLocal()
     try:
-        feature = json.loads(row.feature_json) if row.feature_json else {}
-    except Exception:
-        feature = {}
-    return {
-        "trade_date": row.trade_date,
-        "ts_code": row.ts_code,
-        "name": row.name,
-        "auction_ratio": row.auction_ratio,
-        "auction_turnover_rate": row.auction_turnover_rate,
-        "open_change_pct": row.open_change_pct,
-        "pre_change_pct": row.pre_change_pct,
-        "rise_10d_pct": row.rise_10d_pct,
-        "limit_up_streak": row.limit_up_streak,
-        "market_height_rank": row.market_height_rank,
-        "limit_up_count_100d": row.limit_up_count_100d,
-        "rule_score": row.rule_score,
-        "label_t0_limit_success": row.label_t0_limit_success,
-        "t0_touched_limit": row.t0_touched_limit,
-        "t0_closed_limit": row.t0_closed_limit,
-        "is_one_line_limit_up": row.is_one_line_limit_up,
-        "t0_high_return": row.t0_high_return,
-        "t0_close_return": row.t0_close_return,
-        "t0_low_return": row.t0_low_return,
-        "feature": feature,
-    }
+        return ApiResponse(code=200, message="success", data=list_t0_simulation_backtest_runs(db, limit=limit))
+    finally:
+        db.close()
+
+
+@router.post("/backtest/t0-simulation/runs/{run_id}/cancel", tags=["回测"])
+async def cancel_t0_simulation_backtest_endpoint(run_id: int):
+    db = SessionLocal()
+    try:
+        return ApiResponse(
+            code=200,
+            message="已请求停止日线模拟回测",
+            data=request_cancel_t0_simulation_backtest_run(db, run_id),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    finally:
+        db.close()
+
+
+@router.get("/backtest/t0-simulation/runs/{run_id}", tags=["回测"])
+async def get_t0_simulation_backtest_endpoint(run_id: int):
+    db = SessionLocal()
+    try:
+        return ApiResponse(code=200, message="success", data=get_t0_simulation_backtest_run(db, run_id))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    finally:
+        db.close()

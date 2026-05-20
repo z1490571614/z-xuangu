@@ -29,7 +29,6 @@ from backend.services.scoring.rule_score_service import RuleScoreService
 from backend.services.scoring.next_day_plan import NextDayPlanService
 from backend.services.model_engine.lightgbm_service import (
     batch_predict_before_selection,
-    batch_predict_leader_main_t0,
 )
 from backend.services.scoring_v2 import StockScoringV2Service, is_score_v2_enabled
 from backend.models import SelectionRecord, SelectedStock, StockFeatureSnapshot
@@ -685,19 +684,10 @@ class StockSelectorService:
         except Exception as e:
             logger.warning(f"LightGBM预测失败: {e}")
 
-        # 龙头主升 T+0 成功率模型预测
-        try:
-            merged = batch_predict_leader_main_t0(merged)
-        except Exception as e:
-            logger.warning(f"龙头主升T+0模型预测失败: {e}")
-            for s in merged:
-                s["t0_limit_success_prob"] = None
-
-        # 综合评分: rule_score(55%) + model_score(35%) + t0_prob(10%)
+        # 综合评分: rule_score + active_auction_lgbm，旧 T0 参考模型已移除。
         for s in merged:
             rule_score = s.get("rule_score", 0) or 0
             model_score = s.get("model_score")
-            t0_prob = s.get("t0_limit_success_prob")
             weights = 0
             total = 0.0
             total += rule_score * 0.55
@@ -705,9 +695,6 @@ class StockSelectorService:
             if model_score is not None:
                 total += model_score * 0.35
                 weights += 0.35
-            if t0_prob is not None:
-                total += t0_prob * 0.10
-                weights += 0.10
             s["final_score"] = round(total / weights, 2) if weights > 0 else 0
 
         return merged
@@ -875,14 +862,12 @@ class StockSelectorService:
                     # 评分字段
                     rule_score=stock.get("rule_score"),
                     model_score=stock.get("model_score"),
-                    t0_limit_success_prob=stock.get("t0_limit_success_prob"),
                     final_score=stock.get("final_score"),
                     score_level=stock.get("score_level"),
                     score_breakdown=_json.dumps(stock.get("score_breakdown", {}), ensure_ascii=False) if stock.get("score_breakdown") else None,
                     reasons="; ".join(stock.get("reasons", [])) if stock.get("reasons") else None,
                     risk_tags=_json.dumps(stock.get("risk_tags", []), ensure_ascii=False) if stock.get("risk_tags") else None,
                     next_day_plan=_json.dumps(stock.get("next_day_plan", {}), ensure_ascii=False) if stock.get("next_day_plan") else None,
-                    t0_limit_success_model_version=stock.get("t0_limit_success_prob_model_version"),
                 )
                 db.add(selected_stock)
 
