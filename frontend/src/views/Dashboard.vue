@@ -627,7 +627,11 @@ function getPctClass(v) {
 
 /* Section 样式 */
 .section { margin-top: 24px; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
-.preview-section { width: fit-content; max-width: none; }
+.preview-section {
+  width: fit-content;
+  max-width: none;
+  margin: 24px auto 0;
+}
 .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #f0f0f0; }
 .section-header h3 { margin: 0; font-size: 16px; color: #262626; font-weight: 600; }
 .stock-count { font-size: 13px; color: #999; background: #fafafa; padding: 4px 12px; border-radius: 12px; }
