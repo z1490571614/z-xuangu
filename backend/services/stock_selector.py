@@ -365,8 +365,17 @@ class StockSelectorService:
                 if prev_date is None:
                     logger.warning("无法获取前一交易日，跳过昨涨幅/开涨幅计算")
                 else:
-                    # 1. 用内网通达信行情API获取今日实时数据（open + pre_close），单个查询
-                    realtime = self.collector.get_realtime_quotes(ts_codes)
+                    # 1. 用内网通达信行情API兜底今日实时数据；MCP已返回价格字段时不重复请求
+                    realtime_ts_codes = [
+                        stock.ts_code
+                        for stock in phase1_stocks
+                        if (
+                            getattr(stock, "close", None) is None
+                            or getattr(stock, "change_pct", None) is None
+                            or getattr(stock, "open_change_pct", None) is None
+                        )
+                    ]
+                    realtime = self.collector.get_realtime_quotes(realtime_ts_codes) if realtime_ts_codes else {}
 
                     # 2. 用daily批量获取前一交易日数据（pct_chg = 昨涨幅，open = 降级用）
                     fresh = self.collector._get_pro()
@@ -587,6 +596,9 @@ class StockSelectorService:
             seal_rates=seal_rates,
         )
 
+        def _is_missing(value: Any) -> bool:
+            return value is None or value == ""
+
         merged = []
         for stock in phase1_stocks:
             ts_code = stock.ts_code
@@ -621,12 +633,13 @@ class StockSelectorService:
             if ts_code in analysis:
                 p2 = analysis[ts_code]
                 for key in ("name", "close", "change_pct", "pre_change_pct", "open_change_pct", "industry", "concept"):
-                    if p2.get(key) is not None:
+                    if p2.get(key) is not None and _is_missing(stock_data.get(key)):
                         stock_data[key] = p2[key]
-                if p2.get("close") is not None:
+                if p2.get("close") is not None and _is_missing(stock_data.get("close_price")):
                     stock_data["close_price"] = p2["close"]
 
-                stock_data["circ_mv"] = p2.get("circ_mv", 0) / 10000 if p2.get("circ_mv") else stock_data.get("circ_mv")
+                if p2.get("circ_mv") and _is_missing(stock_data.get("circ_mv")):
+                    stock_data["circ_mv"] = p2.get("circ_mv", 0) / 10000
 
             # 添加阶段3数据
             if ts_code in seal_rates:
