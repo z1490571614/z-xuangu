@@ -177,6 +177,11 @@ async def test_notification(db: Session = Depends(get_db)):
                 'name': s.name,
                 'close': float(s.close_price or 0),
                 'change_pct': float(s.change_pct or 0),
+                'pre_change_pct': float(s.pre_change_pct) if s.pre_change_pct is not None else None,
+                'open_change_pct': float(s.open_change_pct) if s.open_change_pct is not None else None,
+                'lu_tag': s.lu_tag,
+                'lu_status': s.lu_status,
+                'default_t0_limit_prob': float(s.default_t0_limit_prob) if s.default_t0_limit_prob is not None else None,
                 'circ_mv': 0
             })
 

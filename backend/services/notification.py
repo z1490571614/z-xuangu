@@ -25,6 +25,32 @@ class FeishuNotifier:
         self.max_retries = 3
         self.retry_delay = 5
 
+    @staticmethod
+    def _float_or_none(value: Any) -> Optional[float]:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _fmt_pct(cls, value: Any, digits: int = 2) -> str:
+        num = cls._float_or_none(value)
+        if num is None:
+            return "--"
+        return f"{num:.{digits}f}%"
+
+    @classmethod
+    def _sort_by_t0_limit_prob(cls, stocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(
+            stocks,
+            key=lambda stock: cls._float_or_none(stock.get("default_t0_limit_prob")) or -1,
+            reverse=True,
+        )
+
+    @staticmethod
+    def _limit_tag(stock: Dict[str, Any]) -> str:
+        return stock.get("lu_tag") or stock.get("lu_status") or "--"
+
     def build_selection_message(
         self,
         result: Dict[str, Any]
@@ -50,47 +76,27 @@ class FeishuNotifier:
                 }
             }
 
+        sorted_stocks = self._sort_by_t0_limit_prob(stocks)
         content_lines = [
-            f"📊 **【选股通知】{trade_date}**",
-            f"",
-            f"🎯 共选出 **{passed_count}** 只股票",
-            f"",
-            f"---",
-            f""
+            f"**【选股通知】{trade_date}**",
+            "",
+            f"共选出 **{passed_count}** 只股票，按当日涨停概率从高到低排序。",
+            "",
         ]
 
-        for i, stock in enumerate(stocks[:10], 1):
+        for i, stock in enumerate(sorted_stocks, 1):
             ts_code = stock.get('ts_code', '')
             name = stock.get('name', '未知')
-            close = stock.get('close', 0) or stock.get('close_price', 0)
-            change_pct = stock.get('change_pct', 0)
-            circ_mv = stock.get('circ_mv', 0)
-            rule_score = stock.get('rule_score')
-            score_level = stock.get('score_level', '')
-            reasons = stock.get('reasons', [])
-            risk_tags = stock.get('risk_tags', [])
-
-            change_emoji = "📈" if change_pct and change_pct > 0 else "📉"
-
-            line = f"**{i}. {name}** ({ts_code})\n"
-            line += f"   💰 {close:.2f}元 | {change_emoji} {change_pct:.2f}%"
-            if rule_score is not None:
-                line += f" | ⭐ 评分: {rule_score:.1f} **{score_level}**"
-            if circ_mv:
-                line += f"\n   📊 流通市值: {circ_mv:.2f}亿"
-            if reasons:
-                top_reasons = reasons[:3]
-                line += f"\n   📌 {'; '.join(top_reasons)}"
-            if risk_tags:
-                line += f"\n   ⚠️ 风险: {', '.join(risk_tags[:3])}"
+            line = f"**{i}. {name} {ts_code}**\n"
+            line += (
+                f"涨停标签：{self._limit_tag(stock)} | "
+                f"开涨幅：{self._fmt_pct(stock.get('open_change_pct'))} | "
+                f"昨涨幅：{self._fmt_pct(stock.get('pre_change_pct'))} | "
+                f"当日涨停概率：{self._fmt_pct(stock.get('default_t0_limit_prob'), 1)}"
+            )
 
             content_lines.append(line)
             content_lines.append("")
-
-        if passed_count > 10:
-            content_lines.append(
-                f"_... 还有 {passed_count - 10} 只股票未显示_"
-            )
 
         content = "\n".join(content_lines)
 
